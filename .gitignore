@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.sqlite*
+*.log
+.cache/
+models/
+vendor/
