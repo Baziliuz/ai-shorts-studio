@@ -9,14 +9,20 @@ class Store:
         self.db = sqlite3.connect(self.path)
         self.db.execute("PRAGMA journal_mode=WAL")
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (0, 1):
+        if version not in (0, 1, 2):
             self.db.close()
             raise ValueError("Проект создан более новой версией приложения")
+        if version==1:
+            backup_path=self.path.with_name(self.path.name+'.v1-backup.sqlite')
+            if not backup_path.exists():
+                backup=sqlite3.connect(backup_path)
+                try: self.db.backup(backup)
+                finally: backup.close()
         with self.db:
             self.db.execute("CREATE TABLE IF NOT EXISTS project (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)")
             self.db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, status TEXT, output TEXT)")
             self.db.execute("CREATE TABLE IF NOT EXISTS feedback (source TEXT, start_us INTEGER, end_us INTEGER, status TEXT, PRIMARY KEY(source,start_us,end_us))")
-            self.db.execute("PRAGMA user_version=1")
+            self.db.execute("PRAGMA user_version=2")
             if recover:
                 self.db.execute("UPDATE jobs SET status='interrupted' WHERE status IN ('running','queued')")
 

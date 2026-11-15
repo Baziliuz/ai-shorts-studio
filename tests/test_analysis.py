@@ -95,3 +95,49 @@ def test_silent_worker_and_recovery(tmp_path):
     assert saved[0].stat().st_mtime_ns==original
     runner=AnalysisRunner(); runner.cancel()
     with pytest.raises(Cancelled): runner.analyze(request)
+
+
+def test_running_analysis_cancels_descendants(tmp_path,monkeypatch):
+    import subprocess,sys,threading,time
+    import ai_shorts_studio.ai.runner as runner_module
+    pid_path=tmp_path/'child.pid'; real_popen=subprocess.Popen
+    code=("import subprocess,sys,time;from pathlib import Path;"
+          "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);"
+          f"Path({str(pid_path)!r}).write_text(str(p.pid));time.sleep(30)")
+    def launch(command,**kwargs):
+        if '--analysis-worker' in command: command=[sys.executable,'-c',code]
+        return real_popen(command,**kwargs)
+    monkeypatch.setattr(runner_module.subprocess,'Popen',launch)
+    runner=runner_module.AnalysisRunner()
+    timer=threading.Timer(1,runner.cancel); timer.start()
+    try:
+        with pytest.raises(Cancelled): runner.analyze(dict(cache_dir=str(tmp_path/'cache')))
+    finally: timer.cancel()
+    assert runner.process is None and pid_path.exists()
+    assert not list((tmp_path/'cache'/'analysis-jobs').iterdir())
+    pid=int(pid_path.read_text())
+    if sys.platform=='win32':
+        result=subprocess.check_output(['tasklist','/FI',f'PID eq {pid}','/NH'],text=True)
+        assert f' {pid} ' not in result
+    else:
+        status=Path(f'/proc/{pid}/stat')
+        assert not status.exists() or status.read_text().split()[2]=='Z'
+
+
+def test_schema_one_migrates_with_old_clip(tmp_path):
+    import sqlite3
+    path=tmp_path/'legacy.sqlite'
+    data=Project('source','hash',dict(duration_us=100),[Clip('old',0,100)]).serialize()
+    del data['suggestions']
+    for key in ('normalize_audio','duck_game','voice_index'): del data['clips'][0][key]
+    db=sqlite3.connect(path)
+    db.execute('CREATE TABLE project (id INTEGER PRIMARY KEY, data TEXT)')
+    db.execute('INSERT INTO project VALUES (1,?)',(json.dumps(data),)); db.execute('PRAGMA user_version=1'); db.commit(); db.close()
+    store=Store(path)
+    assert store.db.execute('PRAGMA user_version').fetchone()[0]==2
+    assert store.load().clips[0].normalize_audio is False
+    assert store.load().suggestions==[]
+    store.close()
+    backup=sqlite3.connect(str(path)+'.v1-backup.sqlite')
+    assert backup.execute('PRAGMA user_version').fetchone()[0]==1
+    backup.close()

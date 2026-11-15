@@ -2,6 +2,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,7 @@ class AnalysisRunner:
 
     def analyze(self,request,progress=lambda _:None):
         root=Path(request['cache_dir'])/'analysis-jobs'; root.mkdir(parents=True,exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='job-',dir=root) as temporary:
+        with tempfile.TemporaryDirectory(prefix='job-',dir=root,ignore_cleanup_errors=True) as temporary:
             directory=Path(temporary); path=directory/'request.json'
             request=dict(request,work_dir=str(directory/'work'))
             path.write_text(json.dumps(request,ensure_ascii=False),encoding='utf-8')
@@ -55,3 +56,10 @@ class AnalysisRunner:
                 progress(1); return result['result']
             finally:
                 self.stop_tree(); self.process=None
+                for attempt in range(7):
+                    try:
+                        shutil.rmtree(directory); break
+                    except FileNotFoundError: break
+                    except PermissionError:
+                        if attempt==6: break
+                        time.sleep(.05*2**attempt)
