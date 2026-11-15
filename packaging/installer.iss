@@ -1,5 +1,5 @@
 #define AppName "AI Shorts Studio"
-#define AppVersion "0.1.0"
+#define AppVersion "0.1.1"
 [Setup]
 AppId={{347EA3F0-4920-4F49-B96A-361972E97386}
 AppName={#AppName}
@@ -10,7 +10,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=..\dist\installer
-OutputBaseFilename=AIShortsStudio-0.1.0-win64-setup
+OutputBaseFilename=AIShortsStudio-0.1.1-win64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
