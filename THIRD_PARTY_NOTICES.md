@@ -1,6 +1,6 @@
 # Third-party notices — 0.1.0
 
-Проект: GPL-3.0-or-later, полный текст в LICENSE. Приложение не содержит AI-моделей. Таблица описывает планируемый Windows-комплект, а не утверждает, что его сборка уже проверена.
+Проект: GPL-3.0-or-later, полный текст в LICENSE. Приложение не содержит AI-моделей. Таблица описывает планируемый Windows-комплект, сборка и базовый запуск которого проверены Windows CI; ручная приёмка остаётся отдельной.
 
 | Компонент | Версия | Лицензия | Источник и назначение |
 |---|---|---|---|
@@ -15,7 +15,7 @@
 | Inno Setup (инструмент) | 6, установленный на Windows runner | Inno Setup License | https://jrsoftware.org/isinfo.php ; версия компилятора выводится в CI, точный patch зависит от образа runner |
 | pytest (только тесты) | 8.3.4 | MIT | https://pypi.org/project/pytest/8.3.4/ |
 
-Поддержка ОС по upstream: Python 3.12 и Qt 6.8 рассчитаны на Windows 10/11 x64. Источники: https://doc.qt.io/qt-6.8/supported-platforms.html и https://docs.python.org/3.12/using/windows.html . На целевых Windows 10/11 совместимость ещё требуется проверить. Метаданные PyPI закреплённых версий проверены при реализации; Linux-проверка не подтверждает Windows.
+Поддержка ОС по upstream: Python 3.12 и Qt 6.8 рассчитаны на Windows 10/11 x64. Источники: https://doc.qt.io/qt-6.8/supported-platforms.html и https://docs.python.org/3.12/using/windows.html . На Windows Server 2022 пройдены CI-тесты, сборка и базовый запуск EXE. На целевых Windows 10/11 совместимость ещё требуется проверить. Метаданные PyPI закреплённых версий проверены при реализации; Linux-проверка не подтверждает Windows.
 
 ## Проверка архива FFmpeg
 
