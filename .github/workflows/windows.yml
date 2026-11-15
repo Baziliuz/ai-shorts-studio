@@ -50,6 +50,8 @@ jobs:
           Get-Content $result
         env:
           HF_HUB_OFFLINE: '1'
+      - name: Frozen end-to-end speech recognition and ranking (public fixture)
+        run: python scripts/verify_frozen_ai.py --exe dist/AIShortsStudio/AIShortsStudio.exe --download-model
       - name: Compile installer
         shell: pwsh
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging/installer.iss'
