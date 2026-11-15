@@ -15,6 +15,7 @@ class Store:
         with self.db:
             self.db.execute("CREATE TABLE IF NOT EXISTS project (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)")
             self.db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, status TEXT, output TEXT)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS feedback (source TEXT, start_us INTEGER, end_us INTEGER, status TEXT, PRIMARY KEY(source,start_us,end_us))")
             self.db.execute("PRAGMA user_version=1")
             if recover:
                 self.db.execute("UPDATE jobs SET status='interrupted' WHERE status IN ('running','queued')")
@@ -32,6 +33,11 @@ class Store:
     def job(self, identifier, status, output):
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO jobs VALUES (?,?,?)", (identifier,status,str(output)))
+
+    def feedback(self,source,start_us,end_us,status):
+        if status not in ('accepted','rejected'): raise ValueError('Неизвестная оценка')
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO feedback VALUES (?,?,?,?)",(source,start_us,end_us,status))
 
     def close(self):
         self.db.close()

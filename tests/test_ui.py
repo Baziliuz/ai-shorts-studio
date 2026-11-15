@@ -58,3 +58,25 @@ def test_timecodes_dialog_validation(tmp_path):
     dialog.text.setPlainText('00:10\n00:50'); dialog.accept()
     assert dialog.result()==dialog.DialogCode.Accepted
     assert [c.start_us for c in dialog.generated]==[10_000_000,50_000_000]
+
+def test_analysis_dialog_and_review(tmp_path):
+    from ai_shorts_studio.ui.analysis import AnalysisDialog,ReviewDialog
+    from PySide6.QtCore import Qt
+    app=QApplication.instance() or QApplication([])
+    setup=AnalysisDialog({'audio':[dict(index=2,title='Микрофон')]})
+    assert setup.parameters()['audio_index']==2
+    setup.minimum.setValue(60); setup.accept()
+    assert setup.result()!=setup.DialogCode.Accepted and setup.error.text()
+    setup.target.setCurrentIndex(1); setup.accept()
+    assert setup.result()==setup.DialogCode.Accepted
+    proposals=[dict(id='c',name='Ничего себе',start_us=0,end_us=10_000_000,score=70,
+                    evidence=['Есть речь'],text='<b>text is data</b>',status='pending')]
+    review=ReviewDialog(proposals,str(tmp_path/'missing.mp4'))
+    assert review.chosen()==[]
+    review.items.item(0).setCheckState(Qt.CheckState.Checked)
+    assert len(review.chosen())==1
+    review.reject_current()
+    assert review.chosen()==[] and review.proposals[0]['status']=='rejected'
+    assert proposals[0]['status']=='pending'
+    assert review.details.textFormat()==Qt.TextFormat.PlainText
+    review.reject()

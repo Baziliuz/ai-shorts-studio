@@ -29,6 +29,9 @@ class Clip:
     game: Rect = field(default_factory=Rect)
     camera_share: float = .3
     audio: dict = field(default_factory=dict)
+    normalize_audio: bool = False
+    duck_game: bool = False
+    voice_index: int | None = None
 
     def validate(self, duration_us):
         if not (isinstance(self.start_us, int) and isinstance(self.end_us, int)
@@ -40,6 +43,8 @@ class Clip:
             raise ValueError("Недопустимое разрешение")
         if not 0 < self.fps <= 120 or not .1 <= self.camera_share <= .8:
             raise ValueError("Недопустимые параметры")
+        if self.duck_game and (self.voice_index is None or str(self.voice_index) not in self.audio or len(self.audio)<2):
+            raise ValueError('Для приглушения игры выберите микрофон и хотя бы ещё одну отдельную аудиодорожку')
         for r in (self.crop, self.camera, self.game):
             r.validate()
         if any(not 0 <= float(v) <= 4 for v in self.audio.values()):
@@ -58,6 +63,7 @@ class Project:
     fingerprint: str
     metadata: dict
     clips: list[Clip] = field(default_factory=list)
+    suggestions: list[dict] = field(default_factory=list)
 
     def serialize(self):
         return asdict(self)
@@ -65,7 +71,7 @@ class Project:
     @classmethod
     def load(cls, data):
         return cls(data["source"], data["fingerprint"], data["metadata"],
-                   [Clip.load(c) for c in data["clips"]])
+                   [Clip.load(c) for c in data["clips"]], data.get("suggestions", []))
 
 class History:
     def __init__(self):

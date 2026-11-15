@@ -110,3 +110,26 @@ def test_sample_aspect_ratio(tmp_path):
     out=tmp_path/'normalized.mp4'
     Renderer().render(source,Clip('sar',0,500000,mode='blur'),m,out)
     assert probe(out)['sar']=='1:1'
+
+def test_audio_normalization_and_ducking(tmp_path):
+    import numpy as np
+    source=tmp_path/'separate.mkv'
+    run([binary('ffmpeg'),'-v','error','-f','lavfi','-i','testsrc2=s=160x90:r=30:d=2',
+         '-f','lavfi','-i',"aevalsrc=if(between(t\\,0.5\\,1.5)\\,0.5*sin(2*PI*440*t)\\,0):s=48000:d=2",
+         '-f','lavfi','-i','sine=frequency=880:sample_rate=48000:duration=2',
+         '-filter_complex','[1:a]pan=stereo|c0=c0|c1=0*c0[voice];[2:a]pan=stereo|c0=0*c0|c1=c0[game]',
+         '-map','0:v','-map','[voice]','-map','[game]','-c:v','libx264','-c:a','pcm_s16le',str(source)])
+    metadata=probe(source); out=tmp_path/'ducked.mp4'
+    clip=Clip('audio',0,2_000_000,audio={'1':1,'2':1},duck_game=True,voice_index=1)
+    Renderer().render(source,clip,metadata,out)
+    raw=subprocess.check_output([binary('ffmpeg'),'-v','error','-i',str(out),'-vn','-ac','2','-ar','48000','-f','f32le','-'])
+    samples=np.frombuffer(raw,dtype='<f4').reshape(-1,2)
+    rms=lambda x: float(np.sqrt(np.mean(x*x)))
+    before=rms(samples[4800:19000,1]); during=rms(samples[38000:57000,1])
+    assert during < before*.8
+    assert rms(samples[38000:57000,0])>.1
+    clip.normalize_audio=True
+    normalized=tmp_path/'normalized.mp4'; Renderer().render(source,clip,metadata,normalized)
+    assert probe(normalized)['audio']
+    clip.audio={'1':1}
+    with pytest.raises(ValueError): clip.validate(metadata['duration_us'])

@@ -3,11 +3,12 @@ requires = ["setuptools==75.6.0"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "ai-shorts-studio"
-version = "0.1.2"
-description = "Локальный ручной редактор коротких видео"
+version = "0.2.0"
+description = "Локальный редактор с экспериментальным поиском моментов"
 requires-python = ">=3.11,<3.13"
 dependencies = ["PySide6==6.8.3", "platformdirs==4.3.6"]
 [project.optional-dependencies]
+analysis = ["faster-whisper==1.1.1", "ctranslate2==4.6.0"]
 dev = ["pytest==8.3.4", "pyinstaller==6.12.0"]
 [project.scripts]
 ai-shorts-studio = "ai_shorts_studio.app:main"
@@ -15,3 +16,6 @@ ai-shorts-studio = "ai_shorts_studio.app:main"
 where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.setuptools.package-data]
+ai_shorts_studio = ["assets/*.json"]

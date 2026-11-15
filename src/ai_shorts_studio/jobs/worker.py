@@ -5,6 +5,7 @@ class Worker(QThread):
     done = Signal(object)
     failed = Signal(str)
     progress = Signal(int)
+    note = Signal(str)
 
     def __init__(self, task):
         super().__init__()
@@ -14,6 +15,6 @@ class Worker(QThread):
         try:
             self.done.emit(self.task(lambda value:self.progress.emit(round(value*100))))
         except Cancelled:
-            self.failed.emit('Задача отменена. Незавершённый результат удалён.')
+            self.failed.emit('Задача отменена. Можно запустить её повторно.')
         except Exception as error:
             self.failed.emit(str(error))

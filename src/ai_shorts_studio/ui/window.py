@@ -2,6 +2,7 @@ from copy import deepcopy
 from pathlib import Path
 import json
 import re
+import shutil
 from uuid import uuid4
 from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtGui import QAction, QKeySequence
@@ -66,6 +67,7 @@ class Window(QMainWindow):
         self.button('Вернуть исходник',self.show_source,bar)
         self.button('Создать прокси',self.proxy,bar)
         self.button('Кэш',self.cache_info,bar)
+        self.button('Модель речи',self.setup_speech_model,bar)
         splitter = QSplitter(); root.addWidget(splitter,1)
         left = QWidget(); ll = QVBoxLayout(left); splitter.addWidget(left)
         ll.addWidget(QLabel('КЛИПЫ'))
@@ -73,6 +75,8 @@ class Window(QMainWindow):
         self.clips.currentRowChanged.connect(self.load_clip); ll.addWidget(self.clips)
         self.button('+ Новый клип',self.add_clip,ll)
         self.button('Нарезать по таймкодам',self.add_timecodes,ll)
+        self.button('Найти моменты',self.find_moments,ll)
+        self.button('Предложения моментов',self.review_moments,ll)
         self.button('Удалить клип',self.delete_clip,ll)
         self.info = QLabel('Импортируйте MP4, MOV, MKV или AVI.\nВсе материалы остаются на компьютере.')
         self.info.setWordWrap(True); ll.addWidget(self.info)
@@ -118,6 +122,13 @@ class Window(QMainWindow):
         note.setWordWrap(True); form_root.addWidget(note)
         self.audio_box = QGroupBox('Звук · выбранные дорожки сводятся'); self.audio_layout = QFormLayout(self.audio_box)
         self.audio_controls = {}; form_root.addWidget(self.audio_box)
+        self.normalize=QCheckBox('Выровнять громкость · динамическая нормализация')
+        self.duck=QCheckBox('Приглушать игру во время речи')
+        self.voice=QComboBox()
+        form_root.addWidget(self.normalize); form_root.addWidget(self.duck)
+        form_root.addWidget(QLabel('Дорожка микрофона для приглушения:')); form_root.addWidget(self.voice)
+        help_audio=QLabel('Приглушение требует отдельных выбранных дорожек микрофона и игры. Уже сведённый звук не разделяется. Результат слушайте через рендер предпросмотра.')
+        help_audio.setWordWrap(True); form_root.addWidget(help_audio)
         self.button('Применить изменения',self.apply,form_root)
         self.button('Предпросмотр компоновки (до 8 сек.)',self.preview,form_root)
         self.button('Прослушать выбранный микс (до 8 сек.)',self.preview,form_root)
@@ -144,6 +155,8 @@ class Window(QMainWindow):
         self.progress.setValue(0); self.cancel_button.setEnabled(renderer is not None)
         worker = Worker(task); self.worker = worker
         worker.progress.connect(self.progress.setValue)
+        worker.note.connect(self.statusBar().showMessage)
+        if hasattr(renderer,'on_status'): renderer.on_status=worker.note.emit
         worker.done.connect(done)
         worker.failed.connect(self.message)
         worker.finished.connect(self.task_finished)
@@ -241,6 +254,76 @@ class Window(QMainWindow):
         self.project.clips.append(Clip(f'Клип {len(self.project.clips)+1}',start,min(start+30_000_000,m['duration_us']),fps=min(30,m['fps']),audio=audio))
         self.save(); self.refresh(len(self.project.clips)-1)
 
+    def setup_speech_model(self):
+        if self.busy(): return
+        from ai_shorts_studio.ai.models import REGISTRY,ModelDownloader
+        model_dir=self.data_dir/'models'/REGISTRY['id']
+        size=sum(f['size'] for f in REGISTRY['files'])/1024**2
+        text=(f'Для распознавания нужно скачать многоязычную модель small: {size:.0f} МБ. '
+              'Источник: Hugging Face / Systran, лицензия MIT. Модель сохраняется локально, '
+              'файлы проверяются по SHA-256. После загрузки интернет для обработки не нужен. '
+              'Видео, звук и текст не отправляются на сервер. Распознавание в этой версии — CPU int8. Скачать?')
+        if QMessageBox.question(self,'Установка модели речи',text)!=QMessageBox.StandardButton.Yes: return
+        downloader=ModelDownloader()
+        self.background(lambda p:downloader.download(model_dir,p),
+            lambda _:self.message('Модель скачана и проверена. Нажмите «Найти моменты» для запуска.'),downloader)
+
+    def find_moments(self):
+        if self.busy(): return
+        if not self.project:
+            self.message('Сначала импортируйте видео или откройте проект.'); return
+        if self.selected() and not self.apply(): return
+        from ai_shorts_studio.ai.models import REGISTRY,model_ready,ModelDownloader
+        model_dir=self.data_dir/'models'/REGISTRY['id']
+        if self.project.metadata['audio'] and not model_ready(model_dir):
+            self.setup_speech_model(); return
+        from ai_shorts_studio.ui.analysis import AnalysisDialog
+        from ai_shorts_studio.ai.runner import AnalysisRunner
+        dialog=AnalysisDialog(self.project.metadata,self)
+        if dialog.exec()!=QDialog.DialogCode.Accepted: return
+        request=dict(source=self.project.source,fingerprint=self.project.fingerprint,
+            metadata=deepcopy(self.project.metadata),cache_dir=str(self.cache_dir),model_dir=str(model_dir),**dialog.parameters())
+        runner=AnalysisRunner()
+        self.background(lambda p:runner.analyze(request,p),self.analysis_done,runner)
+
+    def analysis_done(self,result):
+        previous={(c['start_us'],c['end_us']):c for c in self.project.suggestions}
+        proposals=result['candidates']
+        for candidate in proposals:
+            old=previous.get((candidate['start_us'],candidate['end_us']))
+            if old: candidate['status']=old.get('status','pending')
+        self.history.record(self.project); self.project.suggestions=proposals; self.save()
+        self.message(f"Анализ завершён. Сегментов речи: {result['segment_count']}, предложений: {len(proposals)}. "
+                     'Откройте «Предложения моментов». Оценки эвристические — просмотрите результат перед экспортом.')
+
+    def review_moments(self):
+        if self.busy(): return
+        if not self.project or not self.project.suggestions:
+            self.message('Пока нет предложений. Запустите «Найти моменты». Если сильных сигналов нет, программа может не предложить клипы.'); return
+        if self.selected() and not self.apply(): return
+        from ai_shorts_studio.ui.analysis import ReviewDialog
+        dialog=ReviewDialog(self.project.suggestions,self.project.source,self)
+        outcome=dialog.exec()
+        chosen=dialog.chosen() if outcome==QDialog.DialogCode.Accepted else []
+        clips=[]
+        metadata=self.project.metadata
+        for candidate in chosen:
+            clip=deepcopy(self.selected())
+            if clip is None:
+                clip=Clip('',0,1,fps=min(30,metadata['fps']),audio={str(metadata['audio'][0]['index']):1} if metadata['audio'] else {})
+            clip.id=uuid4().hex; clip.name=candidate['name']; clip.start_us=candidate['start_us']; clip.end_us=candidate['end_us']
+            clip.validate(metadata['duration_us']); clips.append(clip); candidate['status']='accepted'
+        if clips or dialog.proposals!=self.project.suggestions:
+            self.history.record(self.project); row=len(self.project.clips)
+            self.project.suggestions=dialog.proposals; self.project.clips.extend(clips); self.save()
+            for candidate in dialog.proposals:
+                if candidate['status'] in ('accepted','rejected'):
+                    self.store.feedback(self.project.fingerprint,candidate['start_us'],candidate['end_us'],candidate['status'])
+            if clips:
+                self.refresh(row); self.clips.clearSelection()
+                for index in range(row,len(self.project.clips)): self.clips.item(index).setSelected(True)
+                self.statusBar().showMessage(f'Создано клипов: {len(clips)}. Проверьте компоновку и звук через предпросмотр.')
+
     def add_timecodes(self):
         if self.busy(): return
         if not self.project:
@@ -282,6 +365,11 @@ class Window(QMainWindow):
             r = getattr(c,key)
             for control,value in zip(controls,[r.x,r.y,r.w,r.h]): control.setValue(value)
         self.share.setValue(c.camera_share)
+        self.normalize.setChecked(c.normalize_audio); self.duck.setChecked(c.duck_game)
+        self.voice.clear(); self.voice.addItem('Не выбрана',None)
+        for track in self.project.metadata['audio']:
+            self.voice.addItem(f"#{track['index']} · {track['title']}",track['index'])
+        self.voice.setCurrentIndex(max(0,self.voice.findData(c.voice_index)))
         while self.audio_layout.rowCount(): self.audio_layout.removeRow(0)
         self.audio_controls = {}
         for a in self.project.metadata['audio']:
@@ -304,6 +392,7 @@ class Window(QMainWindow):
         c.mode = self.mode.currentData(); c.width,c.height = map(int,self.resolution.currentData().split('x'))
         c.fps = self.project.metadata['fps'] if self.fps.currentIndex()==0 else float(self.fps.currentText())
         c.camera_share = self.share.value()
+        c.normalize_audio=self.normalize.isChecked(); c.duck_game=self.duck.isChecked(); c.voice_index=self.voice.currentData()
         c.audio = {i:g.value() for i,(check,g) in self.audio_controls.items() if check.isChecked()}
         for key,controls in self.rects.items(): setattr(c,key,Rect(*[s.value() for s in controls]))
         try:
@@ -450,13 +539,16 @@ class Window(QMainWindow):
 
     def cache_info(self):
         if self.busy(): return
-        files = [p for p in self.cache_dir.iterdir() if p.is_file() and p.suffix in ('.mp4','.png')]
+        files = [p for p in self.cache_dir.rglob('*') if p.is_file()]
         size = sum(p.stat().st_size for p in files)
-        if QMessageBox.question(self,'Кэш',f'{size/1024**2:.1f} МБ · {self.cache_dir}\nОчистить прокси и предпросмотры?')==QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self,'Кэш',f'{size/1024**2:.1f} МБ · {self.cache_dir}\nОчистить прокси, предпросмотры и кэш анализа (включая текст речи)? Модели и проекты сохранятся.')==QMessageBox.StandardButton.Yes:
             self.player.stop(); self.player.setSource(QUrl())
             for p in files:
                 try: p.unlink()
                 except OSError: pass
+            for name in ('analysis','analysis-jobs'):
+                folder=self.cache_dir/name
+                if folder.exists(): shutil.rmtree(folder,ignore_errors=True)
             self.show_source()
 
     def write_settings(self,data):

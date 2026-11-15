@@ -40,14 +40,26 @@ def graph(clip, metadata):
     parts += [f'[v0]fps={clip.fps:.8f},format=yuv420p[v]']
     valid = {str(a['index']) for a in metadata['audio']}
     labels = []
+    by_index = {}
     for index, volume in clip.audio.items():
         if str(index) not in valid:
             raise ValueError('Аудиодорожка отсутствует в исходнике')
         label = f'a{len(labels)}'
         parts += [f'[0:{int(index)}]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS,volume={float(volume)},aresample=48000[{label}]']
         labels.append(f'[{label}]')
+        by_index[str(index)]=f'[{label}]'
     if labels:
-        parts += [''.join(labels)+f'amix=inputs={len(labels)}:normalize=0:duration=longest,alimiter=limit=0.95:latency=1[a]']
+        if clip.duck_game:
+            voice=by_index[str(clip.voice_index)]
+            games=[v for k,v in by_index.items() if k!=str(clip.voice_index)]
+            parts += [voice+'asplit=2[voice][side]',
+                      ''.join(games)+f'amix=inputs={len(games)}:normalize=0:duration=longest[games]',
+                      '[games][side]sidechaincompress=threshold=0.03:ratio=8:attack=15:release=300[ducked]',
+                      '[voice][ducked]amix=inputs=2:normalize=0:duration=longest[mixed]']
+        else:
+            parts += [''.join(labels)+f'amix=inputs={len(labels)}:normalize=0:duration=longest[mixed]']
+        effects='loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000,' if clip.normalize_audio else ''
+        parts += [f'[mixed]{effects}alimiter=limit=0.95:latency=1[a]']
     return ';'.join(parts), bool(labels)
 
 def encoder_available(encoder):
@@ -60,7 +72,7 @@ def encoder_available(encoder):
 
 def capabilities():
     filters = run([binary('ffmpeg'),'-hide_banner','-filters'])
-    required = ['trim','atrim','scale','crop','overlay','boxblur','vstack','amix','alimiter','fps']
+    required = ['trim','atrim','scale','crop','overlay','boxblur','vstack','amix','alimiter','fps','loudnorm','sidechaincompress']
     missing = [x for x in required if f' {x} ' not in filters]
     if missing:
         raise RuntimeError('В FFmpeg отсутствуют фильтры: '+', '.join(missing))
