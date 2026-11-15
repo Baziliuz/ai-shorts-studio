@@ -1,4 +1,4 @@
-# Third-party notices — 0.1.0
+# Third-party notices — 0.2.0
 
 Проект: GPL-3.0-or-later, полный текст в LICENSE. Основная модель речи загружается отдельно по подтверждению; небольшой Silero VAD поставляется с faster-whisper. Таблица описывает планируемый Windows-комплект, сборка и базовый запуск которого проверены Windows CI; ручная приёмка остаётся отдельной.
 
@@ -29,7 +29,7 @@ SHA-256: `04861d3339c5ebe38b56c19a15cf2c0cc97f5de4fa8910e4d47e5e6404e4a2d4`.
 
 Runtime-комплект: приложение и его исходный код; CPython runtime; PySide6/shiboken6; необходимые Qt DLL, platform plugin и Multimedia plugin; backend codec DLL из wheel; platformdirs; FFmpeg/ffprobe CLI; лицензии. Сборка onedir сохраняет динамические библиотеки отдельно. Тексты GPL-3.0/LGPL-3.0/LGPL-2.1 включены в `packaging/licenses`. Модели, личные записи, тестовые видео, SQLite-проекты и кэш не включаются.
 
-Будущие AI-модели допускаются только после фиксации источника, версии, лицензии, размера и контрольной суммы отдельным реестром; в версии 0.1.0 такого реестра нет, потому что модели не поставляются.
+Модели допускаются только после фиксации источника, версии, лицензии, размера и контрольной суммы. Реестр основной модели добавлен в версии 0.2.0; в 0.1.x модели не использовались.
 
 ## AI-компоненты 0.2.0 (эксперимент)
 
@@ -40,3 +40,5 @@ VAD: Silero ONNX из faster-whisper 1.1.1, MIT, https://github.com/snakers4/sil
 Основная модель: Systran/faster-whisper-small, multilingual small, MIT (модель Whisper OpenAI), https://huggingface.co/Systran/faster-whisper-small , revision `536b0662742c02347bc0e980a01041f333bce120`. Реестр с точными размерами и SHA-256 каждого файла — src/ai_shorts_studio/assets/models.json. Веса model.bin: 483546902 байт, SHA-256 `3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671`. Источник лицензии Whisper: https://github.com/openai/whisper/blob/main/LICENSE . Основная модель не включается в установщик. CTranslate2 4.5.0 отклонён при Linux-проверке из-за несовместимого executable-stack; выбран и проверен 4.6.0. CUDA/cuDNN не поставляются: распознавание запускается только CPU int8.
 
 Для ручной технической проверки использована публичная тестовая запись JFK из OpenAI Whisper, ревизия `6e3be77e1a105e59086e3e21ff5f609fd6fa89a5`, путь tests/jfk.flac. Личные видео не использовались; тестовая запись и модель не коммитятся. Это проверка работоспособности, а не оценка качества на игровых стримах.
+
+Закреплённые VAD-артефакты из faster-whisper 1.1.1: `silero_decoder_v5.onnx`, 532505 байт, SHA-256 `8c20344f509846a07ccd85827e8857017fae67fabd58689bec1af79e1d488307`; `silero_encoder_v5.onnx`, 713415 байт, SHA-256 `0e9fc8f56407693d283f99045fb95c2b90fdca3433ce5f83e2c121fb4e615075`. Эти небольшие VAD-модели входят в установщик; основная Whisper small загружается отдельно.
