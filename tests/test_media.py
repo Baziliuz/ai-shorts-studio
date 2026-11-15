@@ -1,0 +1,112 @@
+import json
+from pathlib import Path
+import subprocess
+import threading
+import time
+import pytest
+from ai_shorts_studio.domain.model import Clip,Rect
+from ai_shorts_studio.media.probe import binary,run,probe,fingerprint
+from ai_shorts_studio.media.render import Renderer,Cancelled,encoder_available,capabilities
+
+@pytest.fixture(scope='module')
+def source(tmp_path_factory):
+    path = tmp_path_factory.mktemp('медиа с пробелами')/'исходный файл.mkv'
+    run([binary('ffmpeg'),'-v','error','-f','lavfi','-i','testsrc2=s=160x90:r=30:d=3',
+         '-f','lavfi','-i',"aevalsrc=if(between(t\\,1\\,2)\\,0.5*sin(2*PI*440*t)\\,0):s=48000:d=3",
+         '-f','lavfi','-i','sine=frequency=880:duration=3',
+         '-map','0:v','-map','1:a','-map','2:a','-c:v','libx264','-preset','ultrafast','-c:a','pcm_s16le',str(path)])
+    return path
+
+def test_probe_and_corrupt(source,tmp_path):
+    m = probe(source); assert len(m['audio'])==2; assert m['duration_us']==3_000_000
+    assert fingerprint(source)==fingerprint(source)
+    broken = tmp_path/'broken.mp4'; broken.write_bytes(b'broken')
+    with pytest.raises(RuntimeError): probe(broken)
+    with pytest.raises(FileNotFoundError): fingerprint(tmp_path/'missing')
+
+@pytest.mark.parametrize('mode',['center','manual','blur','gaming'])
+def test_compositions(source,tmp_path,mode):
+    m = probe(source)
+    c = Clip(mode,733333,1533333,mode=mode,audio={'1':.8,'2':.2},crop=Rect(.1,.1,.8,.8),game=Rect(.25,0,.75,1))
+    out = tmp_path/(mode+'.mp4'); values=[]
+    Renderer().render(source,c,m,out,progress=values.append)
+    result = probe(out)
+    assert (result['width'],result['height'])==(720,1280)
+    assert abs(result['duration_us']-800000) <= 1_000_000/30
+    assert len(result['audio'])==1 and values[-1]==1
+    with pytest.raises(FileExistsError): Renderer().render(source,c,m,out)
+    assert not list(tmp_path.glob('*.partial.mp4'))
+
+def test_silent_landscape(source,tmp_path):
+    out = tmp_path/'silent.mp4'
+    Renderer().render(source,Clip('silent',0,500000,width=1280,height=720),probe(source),out)
+    assert probe(out)['audio']==[]
+
+def test_cancel_preserves_files(source,tmp_path):
+    before = fingerprint(source)
+    out = tmp_path/'cancelled.mp4'; renderer = Renderer(); renderer.cancel()
+    with pytest.raises(Cancelled): renderer.render(source,Clip('c',0,3_000_000),probe(source),out)
+    assert not out.exists() and fingerprint(source)==before
+    assert not list(tmp_path.glob('*.partial.mp4'))
+
+def test_nvenc_and_filters():
+    caps=capabilities()
+    assert caps['software']
+    assert isinstance(caps['nvenc'],bool)
+    assert not encoder_available('nonexistent_encoder')
+
+def test_video_and_audio_markers(tmp_path):
+    """Color transition and an audio onset share t=1; measure both after trim."""
+    source = tmp_path/'markers.mkv'
+    run([binary('ffmpeg'),'-v','error','-f','lavfi','-i',
+         'color=red:s=160x90:r=30:d=1','-f','lavfi','-i','color=blue:s=160x90:r=30:d=2',
+         '-f','lavfi','-i',"aevalsrc=if(gte(t\\,1)\\,0.5*sin(2*PI*440*t)\\,0):s=48000:d=3",
+         '-filter_complex','[0:v][1:v]concat=n=2:v=1:a=0[v]',
+         '-map','[v]','-map','2:a','-c:v','libx264','-c:a','pcm_s16le',str(source)])
+    out = tmp_path/'trim.mp4'; c = Clip('markers',733333,2400000,audio={'1':1})
+    Renderer().render(source,c,probe(source),out)
+    import array
+    video = subprocess.check_output([binary('ffmpeg'),'-v','error','-i',str(out),'-vf','scale=1:1','-f','rawvideo','-pix_fmt','rgb24','-'])
+    first_blue = next(i for i in range(len(video)//3) if video[i*3+2]>video[i*3]) / 30
+    samples=array.array('f',subprocess.check_output([binary('ffmpeg'),'-v','error','-i',str(out),'-vn','-ac','1','-ar','48000','-f','f32le','-']))
+    onset=next(i for i,v in enumerate(samples) if abs(v)>.05)/48000
+    expected=1-c.start_us/1e6
+    assert abs(first_blue-expected)<=1/30+.001
+    assert abs(onset-expected)<.1
+    assert abs(onset-first_blue)<.1
+
+def test_vfr_and_no_audio(tmp_path):
+    source=tmp_path/'vfr.mkv'
+    run([binary('ffmpeg'),'-v','error','-f','lavfi','-i','testsrc2=s=160x90:r=30:d=2',
+         '-vf',"select='if(lt(t,1),1,not(mod(n,3)))'",'-fps_mode','vfr','-c:v','libx264',str(source)])
+    m=probe(source); assert not m['audio']
+    out=tmp_path/'vfr-output.mp4'
+    Renderer().render(source,Clip('vfr',100000,1_500_000,fps=min(30,m['fps'])),m,out)
+    assert abs(probe(out)['duration_us']-1_400_000)<100000
+
+def test_proxy(source,tmp_path):
+    from ai_shorts_studio.media.proxy import ProxyRenderer
+    out=tmp_path/'proxy.mp4'; m=probe(source)
+    ProxyRenderer().render_proxy(source,m,out,lambda _:None)
+    result=probe(out)
+    assert abs(result['width']/result['height']-m['width']/m['height'])<.02
+    assert abs(result['duration_us']-m['duration_us'])<100000
+    assert len(result['audio'])==1
+
+def test_live_cancel(source,tmp_path):
+    from ai_shorts_studio.domain.model import Clip
+    renderer=Renderer(); out=tmp_path/'live-cancel.mp4'
+    def progress(value): renderer.cancel()
+    with pytest.raises(Cancelled):
+        renderer.render(source,Clip('cancel',0,3_000_000,width=1080,height=1920),probe(source),out,progress=progress)
+    assert not out.exists()
+    assert not list(tmp_path.glob('.*.partial.mp4'))
+
+def test_sample_aspect_ratio(tmp_path):
+    source=tmp_path/'anamorphic.mkv'
+    run([binary('ffmpeg'),'-v','error','-f','lavfi','-i','testsrc2=s=160x90:r=30:d=1',
+         '-vf','setsar=2/1','-c:v','libx264',str(source)])
+    m=probe(source); assert m['width']==320
+    out=tmp_path/'normalized.mp4'
+    Renderer().render(source,Clip('sar',0,500000,mode='blur'),m,out)
+    assert probe(out)['sar']=='1:1'
