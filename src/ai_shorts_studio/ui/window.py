@@ -15,6 +15,7 @@ from ai_shorts_studio.storage.project import Store
 from ai_shorts_studio.media.probe import probe,fingerprint
 from ai_shorts_studio.media.render import Renderer,capabilities
 from ai_shorts_studio.jobs.worker import Worker
+from ai_shorts_studio.ui.timecode_edit import TimecodeEdit,format_timecode
 
 STYLE = '''
 QWidget {background:#151820; color:#e5e7ef; font-size:13px;}
@@ -90,9 +91,9 @@ class Window(QMainWindow):
         right = QWidget(); form_root = QVBoxLayout(right)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(right); splitter.addWidget(scroll)
         self.name = QLineEdit()
-        self.start,self.end = self.spin(0,1e9,6),self.spin(0,1e9,6)
+        self.start,self.end = TimecodeEdit(),TimecodeEdit()
         box = QGroupBox('Фрагмент'); f = QFormLayout(box); form_root.addWidget(box)
-        f.addRow('Название',self.name); f.addRow('Начало, сек.',self.start); f.addRow('Конец, сек.',self.end)
+        f.addRow('Название',self.name); f.addRow('Начало · ЧЧ:ММ:СС',self.start); f.addRow('Конец · ЧЧ:ММ:СС',self.end)
         self.mode = QComboBox()
         for title,key in [('По центру','center'),('Ручная область','manual'),('Размытый фон','blur'),('Игра + камера','gaming')]:
             self.mode.addItem(title,key)
@@ -223,7 +224,7 @@ class Window(QMainWindow):
     def refresh(self,row=0):
         self.loading = True; self.clips.clear()
         for c in self.project.clips:
-            self.clips.addItem(f'{c.name}\n{c.start_us/1e6:.3f} — {c.end_us/1e6:.3f} сек.')
+            self.clips.addItem(f'{c.name}\n{format_timecode(c.start_us)[:-3]} — {format_timecode(c.end_us)[:-3]}')
         self.loading = False
         self.clips.setCurrentRow(min(row,len(self.project.clips)-1))
 
@@ -274,7 +275,7 @@ class Window(QMainWindow):
 
     def load_clip(self,row):
         if self.loading or not self.selected(): return
-        c = self.selected(); self.name.setText(c.name); self.start.setValue(c.start_us/1e6); self.end.setValue(c.end_us/1e6)
+        c = self.selected(); self.name.setText(c.name); self.start.set_us(c.start_us); self.end.set_us(c.end_us)
         self.mode.setCurrentIndex(self.mode.findData(c.mode)); self.resolution.setCurrentIndex(self.resolution.findData(f'{c.width}x{c.height}'))
         self.fps.setCurrentText(str(int(c.fps)) if c.fps in (30,60) else 'Исходная')
         for key,controls in self.rects.items():
@@ -296,7 +297,10 @@ class Window(QMainWindow):
         if old is None or self.busy(): return False
         c = deepcopy(old)
         c.name = self.name.text().strip() or 'Клип'
-        c.start_us,c.end_us = round(self.start.value()*1e6),round(self.end.value()*1e6)
+        try:
+            c.start_us,c.end_us = self.start.value_us(),self.end.value_us()
+        except ValueError as error:
+            self.message(error); return False
         c.mode = self.mode.currentData(); c.width,c.height = map(int,self.resolution.currentData().split('x'))
         c.fps = self.project.metadata['fps'] if self.fps.currentIndex()==0 else float(self.fps.currentText())
         c.camera_share = self.share.value()
@@ -343,14 +347,17 @@ class Window(QMainWindow):
     def mark(self,end):
         if not self.source_view:
             self.message('Установите границы на исходнике'); return
-        (self.end if end else self.start).setValue(self.player.position()/1000)
+        (self.end if end else self.start).set_us(self.player.position()*1000)
 
     def select_regions(self):
         if not self.selected() or self.busy(): return
         from ai_shorts_studio.media.probe import binary,run
         path=self.cache_dir/(uuid4().hex+'.png')
         source=self.project.source
-        position=self.player.position()/1000 if self.source_view else self.start.value()
+        try:
+            position=self.player.position()/1000 if self.source_view else self.start.value_us()/1e6
+        except ValueError as error:
+            self.message(error); return
         position=min(position,max(0,self.project.metadata['duration_us']/1e6-.1))
         def task(progress):
             run([binary('ffmpeg'),'-v','error','-i',source,'-ss',str(position),
