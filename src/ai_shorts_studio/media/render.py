@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from uuid import uuid4
 from ai_shorts_studio.media.probe import binary, probe, run
 
@@ -143,5 +144,15 @@ class Renderer:
             if self.process and self.process.poll() is None:
                 self.process.kill()
                 self.process.wait()
+            if self.process and self.process.stdout:
+                self.process.stdout.close()
             self.process = None
-            temporary.unlink(missing_ok=True)
+            # Windows/antivirus can briefly retain the output after process termination.
+            for attempt in range(7):
+                try:
+                    temporary.unlink(missing_ok=True)
+                    break
+                except PermissionError:
+                    if os.name != 'nt' or attempt == 6:
+                        raise
+                    time.sleep(.05 * 2**attempt)
