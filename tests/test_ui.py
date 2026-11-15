@@ -26,6 +26,12 @@ def test_project_edit_roundtrip(tmp_path):
     assert window.project.clips[0].mode=='gaming'
     window.undo(False); assert window.project.clips[0].name=='Один'
     window.undo(True); assert window.project.clips[0].name=='Изменён'
+    from ai_shorts_studio.domain.timecodes import clips_from_starts
+    window.append_timecode_clips(clips_from_starts('00:01\n00:09',10_000_000,3_000_000,window.selected()))
+    assert len(window.project.clips)==5 and len(window.clips.selectedItems())==2
+    assert window.store.load().clips[-1].end_us==10_000_000
+    window.undo(False); assert len(window.project.clips)==3
+    window.undo(True); assert len(window.project.clips)==5
     window.close()
     store=Store(tmp_path/'project.sqlite'); assert store.load().clips[0].mode=='gaming'; store.close()
 
@@ -41,3 +47,14 @@ def test_region_selection_coordinates(tmp_path):
     point=canvas.normalized(QPointF(rect.x()+rect.width()*.25,rect.y()+rect.height()*.75))
     assert abs(point.x()-.25)<.001 and abs(point.y()-.75)<.001
     outside=canvas.normalized(QPointF(-100,-100)); assert outside.x()==outside.y()==0
+
+def test_timecodes_dialog_validation(tmp_path):
+    from ai_shorts_studio.ui.timecodes import TimecodesDialog
+    from ai_shorts_studio.domain.model import Clip
+    app=QApplication.instance() or QApplication([])
+    dialog=TimecodesDialog(100_000_000,Clip('template',0,1))
+    dialog.text.setPlainText('00:10\nошибка'); dialog.accept()
+    assert dialog.result()!=dialog.DialogCode.Accepted and dialog.error.text()
+    dialog.text.setPlainText('00:10\n00:50'); dialog.accept()
+    assert dialog.result()==dialog.DialogCode.Accepted
+    assert [c.start_us for c in dialog.generated]==[10_000_000,50_000_000]

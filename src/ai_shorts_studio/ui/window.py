@@ -71,6 +71,7 @@ class Window(QMainWindow):
         self.clips = QListWidget(); self.clips.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.clips.currentRowChanged.connect(self.load_clip); ll.addWidget(self.clips)
         self.button('+ Новый клип',self.add_clip,ll)
+        self.button('Нарезать по таймкодам',self.add_timecodes,ll)
         self.button('Удалить клип',self.delete_clip,ll)
         self.info = QLabel('Импортируйте MP4, MOV, MKV или AVI.\nВсе материалы остаются на компьютере.')
         self.info.setWordWrap(True); ll.addWidget(self.info)
@@ -238,6 +239,33 @@ class Window(QMainWindow):
         audio = {str(m['audio'][0]['index']):1.0} if m['audio'] else {}
         self.project.clips.append(Clip(f'Клип {len(self.project.clips)+1}',start,min(start+30_000_000,m['duration_us']),fps=min(30,m['fps']),audio=audio))
         self.save(); self.refresh(len(self.project.clips)-1)
+
+    def add_timecodes(self):
+        if self.busy(): return
+        if not self.project:
+            self.message('Сначала импортируйте видео или откройте проект.'); return
+        if self.selected() and not self.apply(): return
+        from ai_shorts_studio.ui.timecodes import TimecodesDialog
+        metadata=self.project.metadata
+        template=deepcopy(self.selected())
+        if template is None:
+            audio={str(metadata['audio'][0]['index']):1} if metadata['audio'] else {}
+            template=Clip('',0,1,fps=min(30,metadata['fps']),audio=audio)
+        dialog=TimecodesDialog(metadata['duration_us'],template,self)
+        if dialog.exec()!=QDialog.DialogCode.Accepted: return
+        self.append_timecode_clips(dialog.generated)
+
+    def append_timecode_clips(self,clips):
+        if not clips: return
+        for clip in clips: clip.validate(self.project.metadata['duration_us'])
+        row=len(self.project.clips)
+        self.history.record(self.project)
+        self.project.clips.extend(clips)
+        self.save(); self.refresh(row)
+        self.clips.clearSelection()
+        for index in range(row,len(self.project.clips)):
+            self.clips.item(index).setSelected(True)
+        self.statusBar().showMessage(f'Создано клипов: {len(clips)}. Они выделены для экспорта.')
 
     def delete_clip(self):
         if not self.selected() or self.busy(): return
