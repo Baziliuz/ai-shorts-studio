@@ -6,6 +6,7 @@ import time
 import pytest
 from ai_shorts_studio.domain.model import Clip,Rect
 from ai_shorts_studio.media.probe import binary,run,probe,fingerprint
+from ai_shorts_studio.media import render
 from ai_shorts_studio.media.render import Renderer,Cancelled,encoder_available,capabilities
 
 @pytest.fixture(scope='module')
@@ -35,7 +36,7 @@ def test_compositions(source,tmp_path,mode):
     assert abs(result['duration_us']-800000) <= 1_000_000/30
     assert len(result['audio'])==1 and values[-1]==1
     with pytest.raises(FileExistsError): Renderer().render(source,c,m,out)
-    assert not list(tmp_path.glob('*.partial.mp4'))
+    assert not list(tmp_path.glob('.ai-shorts-render-*'))
 
 def test_silent_landscape(source,tmp_path):
     out = tmp_path/'silent.mp4'
@@ -47,13 +48,58 @@ def test_cancel_preserves_files(source,tmp_path):
     out = tmp_path/'cancelled.mp4'; renderer = Renderer(); renderer.cancel()
     with pytest.raises(Cancelled): renderer.render(source,Clip('c',0,3_000_000),probe(source),out)
     assert not out.exists() and fingerprint(source)==before
-    assert not list(tmp_path.glob('*.partial.mp4'))
+    assert not list(tmp_path.glob('.ai-shorts-render-*'))
 
 def test_nvenc_and_filters():
     caps=capabilities()
     assert caps['software']
     assert isinstance(caps['nvenc'],bool)
     assert not encoder_available('nonexistent_encoder')
+
+@pytest.mark.parametrize(('nvenc', 'preference', 'expected'), [
+    (True, 'auto', 'h264_nvenc'),
+    (False, 'auto', 'libx264'),
+    (False, 'h264_nvenc', 'libx264'),
+    (True, 'libx264', 'libx264'),
+])
+def test_export_encoder_selection(monkeypatch, nvenc, preference, expected):
+    monkeypatch.setattr(render, 'capabilities', lambda: {'nvenc': nvenc, 'software': True})
+    assert render.choose_encoder(preference) == expected
+
+@pytest.mark.parametrize(('overrides', 'message'), [
+    ({'width': 900}, 'Разрешение'),
+    ({'duration_us': 200_000}, 'Длительность'),
+    ({'fps': 60}, 'Частота кадров'),
+    ({'video_codec': 'hevc'}, 'H.264'),
+    ({'audio': [{'codec': 'opus'}]}, 'звуковой дорожки'),
+])
+def test_verify_output_before_publish(monkeypatch, tmp_path, overrides, message):
+    clip = Clip('Экспорт', 0, 1_000_000)
+    result = dict(width=720, height=1280, duration_us=1_000_000, fps=30,
+                  video_codec='h264', audio=[{'codec': 'aac'}])
+    result.update(overrides)
+    monkeypatch.setattr(render, 'probe', lambda path, *, strict_fps: result)
+    with pytest.raises(RuntimeError, match=message):
+        render.validate_export(tmp_path / 'staged.mp4', clip, 1, audio=True)
+
+def test_cancel_during_validation_preserves_previous_export(source, tmp_path, monkeypatch):
+    previous = tmp_path / 'предыдущий.mp4'
+    previous.write_bytes(b'confirmed')
+    out = tmp_path / 'повторный.mp4'
+    renderer = Renderer()
+    validate = render.validate_export
+
+    def cancel_after_validation(path, clip, duration, audio):
+        assert path.parent.name.startswith('.ai-shorts-render-')
+        validate(path, clip, duration, audio)
+        renderer.cancel()
+
+    monkeypatch.setattr(render, 'validate_export', cancel_after_validation)
+    with pytest.raises(Cancelled):
+        renderer.render(source, Clip('Клип', 0, 500_000), probe(source), out)
+    assert previous.read_bytes() == b'confirmed'
+    assert not out.exists()
+    assert not list(tmp_path.glob('.ai-shorts-render-*'))
 
 def test_video_and_audio_markers(tmp_path):
     """Color transition and an audio onset share t=1; measure both after trim."""
@@ -74,6 +120,28 @@ def test_video_and_audio_markers(tmp_path):
     assert abs(first_blue-expected)<=1/30+.001
     assert abs(onset-expected)<.1
     assert abs(onset-first_blue)<.1
+
+def test_delayed_audio_keeps_original_timeline(tmp_path):
+    import array
+
+    source = tmp_path / 'delayed-track.mkv'
+    run([binary('ffmpeg'), '-v', 'error',
+         '-f', 'lavfi', '-i', 'testsrc2=s=160x90:r=30:d=3',
+         '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=mono:d=3',
+         '-itsoffset', '1.4', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=1',
+         '-map', '0:v', '-map', '1:a', '-map', '2:a', '-c:v', 'libx264', '-c:a', 'pcm_s16le',
+         str(source)])
+    metadata = probe(source)
+    audio = {str(track['index']): 1 for track in metadata['audio']}
+    clip = Clip('Синхронизация', 800_000, 2_300_000, audio=audio)
+    out = tmp_path / 'sync.mp4'
+    Renderer().render(source, clip, metadata, out)
+    samples = array.array('f', subprocess.check_output([
+        binary('ffmpeg'), '-v', 'error', '-i', str(out), '-vn',
+        '-ac', '1', '-ar', '48000', '-f', 'f32le', '-',
+    ]))
+    onset = next(i for i, sample in enumerate(samples) if abs(sample) > .05) / 48000
+    assert onset == pytest.approx(.6, abs=.05)
 
 def test_vfr_and_no_audio(tmp_path):
     source=tmp_path/'vfr.mkv'
@@ -100,7 +168,7 @@ def test_live_cancel(source,tmp_path):
     with pytest.raises(Cancelled):
         renderer.render(source,Clip('cancel',0,3_000_000,width=1080,height=1920),probe(source),out,progress=progress)
     assert not out.exists()
-    assert not list(tmp_path.glob('.*.partial.mp4'))
+    assert not list(tmp_path.glob('.ai-shorts-render-*'))
 
 def test_sample_aspect_ratio(tmp_path):
     source=tmp_path/'anamorphic.mkv'

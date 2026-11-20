@@ -5,6 +5,8 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
+env:
+  INSTALLER_ARTIFACT: AIShortsStudio-0.2.0-windows-x64
 jobs:
   windows:
     runs-on: windows-2022
@@ -57,8 +59,59 @@ jobs:
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging/installer.iss'
       - uses: actions/upload-artifact@v4
         with:
-          name: AIShortsStudio-0.2.0-windows-x64
+          name: ${{ env.INSTALLER_ARTIFACT }}
           path: |
             dist/installer/*.exe
             THIRD_PARTY_NOTICES.md
           if-no-files-found: error
+  installed-app:
+    name: Installed app smoke test
+    needs: windows
+    runs-on: windows-2022
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.INSTALLER_ARTIFACT }}
+          path: ${{ runner.temp }}/installer-artifact
+      - name: Install and launch from the installed directory
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          # Use only the downloaded artifact. This runner still has preinstalled tooling.
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+          Remove-Item Env:PYTHONHOME, Env:PYTHONPATH -ErrorAction SilentlyContinue
+
+          $artifact = Join-Path $env:RUNNER_TEMP 'installer-artifact'
+          $installers = @(Get-ChildItem -LiteralPath $artifact -Filter '*-setup.exe' -Recurse -File)
+          if ($installers.Count -ne 1) { throw "Expected one setup executable, found $($installers.Count)" }
+          $installDir = Join-Path $env:RUNNER_TEMP 'Установка AI Shorts Studio'
+          $setupLog = Join-Path $env:RUNNER_TEMP 'studio-setup.log'
+          $setup = Start-Process -FilePath $installers[0].FullName -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
+            "/DIR=`"$installDir`"", "/LOG=`"$setupLog`""
+          ) -PassThru
+          if (-not $setup.WaitForExit(180000)) { $setup.Kill($true); throw 'Installer timeout' }
+          if ($setup.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $setupLog) { Get-Content -LiteralPath $setupLog -Tail 40 }
+            throw "Installation failed: $($setup.ExitCode)"
+          }
+
+          $studio = Join-Path $installDir 'AIShortsStudio.exe'
+          $app = Start-Process -FilePath $studio -ArgumentList '--smoke-test' -WorkingDirectory $env:RUNNER_TEMP -PassThru
+          if (-not $app.WaitForExit(30000)) { $app.Kill($true); throw 'Installed app startup timeout' }
+          if ($app.ExitCode -ne 0) { throw "Installed app startup failed: $($app.ExitCode)" }
+
+          $ffmpeg = Join-Path $installDir '_internal\bin\ffmpeg.exe'
+          $ffprobe = Join-Path $installDir '_internal\bin\ffprobe.exe'
+          $sample = Join-Path $env:RUNNER_TEMP 'Проверка кодеков.mp4'
+          & $ffmpeg -v error -nostdin -f lavfi -i 'testsrc2=size=64x64:rate=30' -f lavfi -i 'sine=frequency=440' -t 0.25 -c:v libx264 -c:a aac $sample
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled FFmpeg could not encode H.264/AAC' }
+          $probe = & $ffprobe -v error -show_entries stream=codec_type,codec_name,width,height -of json $sample
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled ffprobe could not read the sample' }
+          $streams = ($probe -join "`n" | ConvertFrom-Json).streams
+          $video = $streams | Where-Object codec_type -EQ 'video'
+          $audio = $streams | Where-Object codec_type -EQ 'audio'
+          if ($video.codec_name -ne 'h264' -or $video.width -ne 64 -or $video.height -ne 64 -or $audio.codec_name -ne 'aac') {
+            throw 'Bundled media tools returned an unexpected sample format'
+          }

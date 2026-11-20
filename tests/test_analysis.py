@@ -134,7 +134,7 @@ def test_schema_one_migrates_with_old_clip(tmp_path):
     db.execute('CREATE TABLE project (id INTEGER PRIMARY KEY, data TEXT)')
     db.execute('INSERT INTO project VALUES (1,?)',(json.dumps(data),)); db.execute('PRAGMA user_version=1'); db.commit(); db.close()
     store=Store(path)
-    assert store.db.execute('PRAGMA user_version').fetchone()[0]==2
+    assert store.db.execute('PRAGMA user_version').fetchone()[0]==3
     assert store.load().clips[0].normalize_audio is False
     assert store.load().suggestions==[]
     store.close()

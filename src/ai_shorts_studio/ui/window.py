@@ -1,7 +1,6 @@
 from copy import deepcopy
 from pathlib import Path
 import json
-import re
 import shutil
 from uuid import uuid4
 from PySide6.QtCore import Qt, QUrl, QTimer
@@ -14,7 +13,8 @@ from PySide6.QtWidgets import (QMainWindow,QWidget,QVBoxLayout,QHBoxLayout,QForm
 from ai_shorts_studio.domain.model import Project,Clip,Rect,History
 from ai_shorts_studio.storage.project import Store
 from ai_shorts_studio.media.probe import probe,fingerprint
-from ai_shorts_studio.media.render import Renderer,capabilities
+from ai_shorts_studio.media.render import Renderer
+from ai_shorts_studio.jobs.export import export_clips
 from ai_shorts_studio.jobs.worker import Worker
 from ai_shorts_studio.ui.timecode_edit import TimecodeEdit,format_timecode
 
@@ -500,42 +500,26 @@ class Window(QMainWindow):
         upscaled = any(c.width>self.project.metadata['width'] or c.height>self.project.metadata['height'] or c.mode in ('gaming','manual') for c in clips)
         if upscaled and QMessageBox.question(self,'Масштабирование','Возможны увеличение исходника или выбранных областей и потеря детализации. Продолжить?') != QMessageBox.StandardButton.Yes: return
         dialog = QDialog(self); dialog.setWindowTitle('Кодировщик'); layout = QVBoxLayout(dialog)
-        selector = QComboBox(); selector.addItems(['Программный H.264 (libx264)','NVIDIA H.264 (NVENC, с проверкой)']); layout.addWidget(selector)
+        selector = QComboBox()
+        selector.addItem('Автоматически · NVIDIA NVENC или libx264', 'auto')
+        selector.addItem('Программный H.264 (libx264)', 'libx264')
+        layout.addWidget(selector)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel); layout.addWidget(buttons)
         buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject)
         if dialog.exec()!=QDialog.DialogCode.Accepted: return
-        encoder = 'h264_nvenc' if selector.currentIndex() else 'libx264'
-        outputs = []
-        for c in clips:
-            safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',c.name).strip(' .')[:80] or 'clip'
-            target = Path(folder)/(safe+'_'+c.id[:8]+'.mp4')
-            if target.exists():
-                self.message(f'Файл уже существует: {target.name}. Выберите другую папку или измените имя клипа.'); return
-            outputs.append(target)
-        renderer = Renderer(); source = self.project.source; metadata = deepcopy(self.project.metadata)
-        for c,out in zip(clips,outputs): self.store.job(c.id,'queued',out)
-        # SQLite connections are created in their owning worker thread.
+        self.start_export(clips, folder, selector.currentData())
+
+    def start_export(self, clips, folder, preference="auto"):
+        renderer = Renderer()
+        source, metadata = self.project.source, deepcopy(self.project.metadata)
         db_path = self.store.path
-        def task(progress):
-            caps = capabilities()
-            if encoder=='h264_nvenc' and not caps['nvenc']:
-                raise RuntimeError('NVENC недоступен после реального пробного кодирования. Выберите программный H.264.')
-            if encoder=='libx264' and not caps['software']: raise RuntimeError('В сборке FFmpeg нет рабочего libx264')
-            store = Store(db_path, recover=False)
-            try:
-                for index,(c,out) in enumerate(zip(clips,outputs)):
-                    if renderer.cancelled.is_set():
-                        from ai_shorts_studio.media.render import Cancelled
-                        raise Cancelled()
-                    store.job(c.id,'running',out)
-                    try:
-                        renderer.render(source,c,metadata,out,encoder,lambda v:progress((index+v)/len(clips)))
-                        store.job(c.id,'completed',out)
-                    except Exception:
-                        store.job(c.id,'interrupted',out); raise
-            finally: store.close()
-            return outputs
-        self.background(task,lambda result:self.message('Экспортировано:\n'+'\n'.join(map(str,result))),renderer)
+        self.background(
+            lambda progress: export_clips(db_path, source, metadata, clips, folder, renderer, progress, preference),
+            self.export_done, renderer,
+        )
+
+    def export_done(self, results):
+        self.message('Экспортировано:\n' + '\n'.join(str(result.video) for result in results))
 
     def cache_info(self):
         if self.busy(): return

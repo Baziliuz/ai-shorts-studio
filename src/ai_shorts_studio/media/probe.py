@@ -30,7 +30,7 @@ def fingerprint(path):
             h.update(block)
     return h.hexdigest()
 
-def probe(path):
+def probe(path, *, strict_fps=False):
     data = json.loads(run([binary('ffprobe'), '-v','error','-show_format','-show_streams','-of','json',str(path)]))
     videos = [s for s in data['streams'] if s['codec_type']=='video' and not s.get('disposition',{}).get('attached_pic')]
     if not videos:
@@ -39,6 +39,12 @@ def probe(path):
     duration = float(data['format'].get('duration', v.get('duration',0)))
     if duration <= 0:
         raise ValueError('Не удалось определить длительность')
+    try:
+        video_duration = float(v['duration'])
+        if not math.isfinite(video_duration) or video_duration <= 0:
+            video_duration = duration
+    except (KeyError, TypeError, ValueError):
+        video_duration = duration
     rotation = int(float(v.get('tags',{}).get('rotate',0)))
     for side in v.get('side_data_list',[]):
         rotation = int(side.get('rotation',rotation))
@@ -51,12 +57,15 @@ def probe(path):
     if rotation % 180:
         w,h = h,w
     try:
-        fps = float(Fraction(v.get('avg_frame_rate','30/1')))
-    except (ValueError, ZeroDivisionError):
+        fps = float(Fraction(v['avg_frame_rate']))
+        if not math.isfinite(fps) or fps <= 0:
+            raise ValueError('Недопустимая частота кадров')
+    except (KeyError, ValueError, ZeroDivisionError):
+        if strict_fps:
+            raise ValueError('Не удалось проверить частоту кадров результата') from None
         fps = 30
-    if not math.isfinite(fps) or fps <= 0:
-        fps = 30
-    return dict(duration_us=round(duration*1e6), width=w, height=h, fps=fps,
+    return dict(duration_us=round(duration*1e6), video_duration_us=round(video_duration*1e6),
+                width=w, height=h, fps=fps,
                 size=Path(path).stat().st_size, video_codec=v['codec_name'], video_index=v['index'],
                 rotation=rotation, sar=sar, audio=[dict(index=s['index'], codec=s['codec_name'],
                 title=s.get('tags',{}).get('title',f"Дорожка {s['index']}"))

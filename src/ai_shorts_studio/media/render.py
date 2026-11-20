@@ -6,7 +6,6 @@ import subprocess
 import tempfile
 import threading
 import time
-from uuid import uuid4
 from ai_shorts_studio.media.probe import binary, probe, run
 
 class Cancelled(Exception):
@@ -23,9 +22,12 @@ def fit(w,h):
 
 def graph(clip, metadata):
     w,h = clip.width,clip.height
-    start,end = clip.start_us/1e6,clip.end_us/1e6
+    duration = (clip.end_us - clip.start_us) / 1e6
     # FFmpeg autorotates before filters; normalize sample aspect ratio before crop.
-    prefix = f"[0:{metadata['video_index']}]trim=start={start:.6f}:end={end:.6f},setpts=PTS-STARTPTS,scale=trunc(iw*sar/2)*2:ih,setsar=1"
+    prefix = (
+        f"[0:{metadata['video_index']}]trim=end={duration:.6f},"
+        "scale=trunc(iw*sar/2)*2:ih,setsar=1"
+    )
     parts = []
     if clip.mode == 'blur':
         parts += [prefix+' ,split=2[bg][fg]',f'[bg]{fill(w,h)},boxblur=20:2[b]',
@@ -37,7 +39,7 @@ def graph(clip, metadata):
                   f'[game]{crop(clip.game)},{fit(w,h-top)}[g]', '[c][g]vstack=inputs=2[v0]']
     else:
         parts += [prefix+(','+crop(clip.crop) if clip.mode=='manual' else '')+','+fill(w,h)+'[v0]']
-    parts += [f'[v0]fps={clip.fps:.8f},format=yuv420p[v]']
+    parts += [f'[v0]fps=fps={clip.fps:.8f}:start_time=0,format=yuv420p[v]']
     valid = {str(a['index']) for a in metadata['audio']}
     labels = []
     by_index = {}
@@ -45,7 +47,11 @@ def graph(clip, metadata):
         if str(index) not in valid:
             raise ValueError('Аудиодорожка отсутствует в исходнике')
         label = f'a{len(labels)}'
-        parts += [f'[0:{int(index)}]atrim=start={start:.6f}:end={end:.6f},asetpts=PTS-STARTPTS,volume={float(volume)},aresample=48000[{label}]']
+        # Align every stream to the same origin before mixing. Pad delayed streams with silence.
+        parts += [
+            f'[0:{int(index)}]atrim=end={duration:.6f},volume={float(volume)},'
+            f'aresample=48000:async=1:first_pts=0[{label}]'
+        ]
         labels.append(f'[{label}]')
         by_index[str(index)]=f'[{label}]'
     if labels:
@@ -78,26 +84,53 @@ def capabilities():
         raise RuntimeError('В FFmpeg отсутствуют фильтры: '+', '.join(missing))
     return {'nvenc':encoder_available('h264_nvenc'), 'software':encoder_available('libx264')}
 
+def choose_encoder(preference='auto'):
+    if preference not in ('auto', 'h264_nvenc', 'libx264'):
+        raise ValueError('Неизвестный кодировщик H.264')
+    available = capabilities()
+    if preference != 'libx264' and available['nvenc']:
+        return 'h264_nvenc'
+    if available['software']:
+        return 'libx264'
+    raise RuntimeError('Нет доступного кодировщика H.264 для выбранного режима')
+
 def check_space(folder, duration, width, height):
     # Conservative workspace reserve; final encoder size depends on content.
     needed = max(128*1024**2, int(duration * width * height * .6))
     if shutil.disk_usage(folder).free < needed:
         raise RuntimeError(f'Недостаточно места: требуется резерв {needed/1024**3:.1f} ГБ')
 
+def validate_export(path, clip, duration, audio):
+    result = probe(path, strict_fps=True)
+    if (result['width'], result['height']) != (clip.width, clip.height):
+        raise RuntimeError('Разрешение результата отличается от выбранного профиля')
+    if abs(result['duration_us'] / 1e6 - duration) > max(.15, 2 / clip.fps):
+        raise RuntimeError('Длительность результата отличается от границ клипа')
+    if abs(result['fps'] - clip.fps) > .01:
+        raise RuntimeError('Частота кадров результата отличается от выбранной')
+    if result['video_codec'] != 'h264':
+        raise RuntimeError('Видеодорожка результата имеет кодек, отличный от H.264')
+    if [track['codec'] for track in result['audio']] != (['aac'] if audio else []):
+        raise RuntimeError('Проверка звуковой дорожки не пройдена')
+
 class Renderer:
     def __init__(self):
         self.cancelled = threading.Event()
         self.process = None
+        self.on_status = lambda message: None
 
     def cancel(self):
         self.cancelled.set()
-        if self.process and self.process.poll() is None:
+        process = self.process
+        if process is not None and process.poll() is None:
             try:
-                self.process.terminate()
+                process.terminate()
             except OSError:
                 pass
 
     def render(self, source, clip, metadata, destination, encoder='libx264', progress=lambda x:None, _proxy=False):
+        if self.cancelled.is_set():
+            raise Cancelled()
         if not _proxy:
             clip.validate(metadata['duration_us'])
         if clip.fps > metadata['fps'] + .01:
@@ -107,44 +140,25 @@ class Renderer:
             raise FileExistsError(f'Файл уже существует: {destination}')
         duration = (clip.end_us-clip.start_us)/1e6
         check_space(destination.parent,duration,clip.width,clip.height)
-        temporary = destination.with_name('.'+destination.stem+'.'+uuid4().hex+'.partial.mp4')
+        if encoder == 'auto':
+            encoder = choose_encoder()
         filters,audio = graph(clip,metadata)
-        args = [binary('ffmpeg'),'-hide_banner','-nostdin','-v','error','-i',str(source),
-                '-filter_complex',filters,'-map','[v]']
+        args = [binary('ffmpeg'), '-hide_banner', '-nostdin', '-v', 'error']
+        if clip.start_us:
+            # Accurate input seeking decodes from the preceding keyframe and shifts every track together.
+            args += ['-ss', f'{clip.start_us / 1e6:.6f}']
+        args += ['-i', str(source), '-filter_complex', filters, '-map', '[v]']
         if audio:
             args += ['-map','[a]','-c:a','aac','-b:a','192k']
         args += ['-c:v',encoder,'-pix_fmt','yuv420p','-movflags','+faststart','-t',f'{duration:.6f}',
-                 '-progress','pipe:1','-nostats','-n',str(temporary)]
+                 '-progress','pipe:1','-nostats','-n']
+        attempt_dir = Path(tempfile.mkdtemp(prefix='.ai-shorts-render-', dir=destination.parent))
+        temporary = attempt_dir / 'result.mp4'
         try:
-            with tempfile.TemporaryFile() as errors:
-                if self.cancelled.is_set():
-                    raise Cancelled()
-                self.process = subprocess.Popen(args,stdout=subprocess.PIPE,stderr=errors,text=True,
-                    encoding='utf-8', creationflags=0x08000000 if os.name=='nt' else 0)
-                for line in self.process.stdout:
-                    if self.cancelled.is_set():
-                        self.process.terminate()
-                        break
-                    if line.startswith('out_time_us='):
-                        try:
-                            progress(min(.99,max(0,int(line.split('=')[1])/1e6/duration)))
-                        except ValueError:
-                            pass
-                try:
-                    code = self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    code = self.process.wait()
-                if self.cancelled.is_set():
-                    raise Cancelled()
-                if code:
-                    errors.seek(0)
-                    raise RuntimeError(errors.read().decode('utf-8',errors='replace')[-4000:])
-            result = probe(temporary)
-            if (result['width'],result['height']) != (clip.width,clip.height) or abs(result['duration_us']/1e6-duration) > max(.15,2/clip.fps):
-                raise RuntimeError('Проверка результата экспорта не пройдена')
-            if bool(result['audio']) != audio:
-                raise RuntimeError('Проверка звуковой дорожки не пройдена')
+            self._encode(args + [str(temporary)], attempt_dir, duration, progress)
+            validate_export(temporary, clip, duration, audio)
+            if self.cancelled.is_set():
+                raise Cancelled()
             # Atomic no-clobber publication on the same filesystem.
             if os.name == 'nt':
                 os.rename(temporary,destination)  # Windows rename rejects an existing destination.
@@ -153,18 +167,48 @@ class Renderer:
             progress(1)
             return str(destination)
         finally:
-            if self.process and self.process.poll() is None:
-                self.process.kill()
-                self.process.wait()
-            if self.process and self.process.stdout:
-                self.process.stdout.close()
-            self.process = None
             # Windows/antivirus can briefly retain the output after process termination.
             for attempt in range(7):
                 try:
-                    temporary.unlink(missing_ok=True)
+                    shutil.rmtree(attempt_dir)
                     break
                 except PermissionError:
                     if os.name != 'nt' or attempt == 6:
                         raise
                     time.sleep(.05 * 2**attempt)
+
+    def _encode(self, args, attempt_dir, duration, progress):
+        with tempfile.TemporaryFile(dir=attempt_dir) as errors:
+            if self.cancelled.is_set():
+                raise Cancelled()
+            process = subprocess.Popen(
+                args, stdout=subprocess.PIPE, stderr=errors, text=True, encoding='utf-8',
+                creationflags=0x08000000 if os.name == 'nt' else 0,
+            )
+            self.process = process
+            try:
+                if self.cancelled.is_set():
+                    raise Cancelled()
+                for line in process.stdout:
+                    if self.cancelled.is_set():
+                        break
+                    if line.startswith('out_time_us='):
+                        try:
+                            elapsed = int(line.split('=', 1)[1]) / 1e6
+                        except ValueError:
+                            continue
+                        progress(min(.99, max(0, elapsed / duration)))
+                if self.cancelled.is_set():
+                    raise Cancelled()
+                code = process.wait(timeout=5)
+                if self.cancelled.is_set():
+                    raise Cancelled()
+                if code:
+                    errors.seek(0)
+                    raise RuntimeError(errors.read().decode('utf-8', errors='replace')[-4000:])
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                process.stdout.close()
+                self.process = None
