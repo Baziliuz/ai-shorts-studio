@@ -14,3 +14,6 @@ dist/
 .cache/
 models/
 vendor/
+*.wav
+*.flac
+*.mp3

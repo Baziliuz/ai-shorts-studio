@@ -1,0 +1,118 @@
+name: Windows build and tests
+on: [push, pull_request, workflow_dispatch]
+concurrency:
+  group: windows-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+env:
+  INSTALLER_ARTIFACT: AIShortsStudio-0.3.0-windows-x64
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.9'
+          cache: pip
+      - run: python -m pip install -r requirements-dev.lock -r requirements-ai.lock -e ".[dev,analysis]"
+      - run: python scripts/fetch_ffmpeg.py
+      - name: Add pinned FFmpeg to path
+        shell: pwsh
+        run: '"${{ github.workspace }}\vendor\ffmpeg\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
+      - name: Tests with synthetic media
+        run: python -m pytest -q
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - name: Freeze desktop app
+        run: python -m PyInstaller --noconfirm packaging/studio.spec
+      - name: Check Qt Multimedia payload
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem dist/AIShortsStudio -Recurse -File
+          if (-not ($files | Where-Object Name -Match 'Qt6Multimedia.dll')) { throw 'Qt Multimedia DLL missing' }
+          if (-not ($files | Where-Object Name -Match 'ffmpegmediaplugin.dll')) { throw 'Qt FFmpeg backend missing' }
+          if (-not ($files | Where-Object Name -Match 'avcodec.*dll')) { throw 'Qt codec libraries missing' }
+          if (-not ($files | Where-Object Name -EQ 'qjpeg.dll')) { throw 'Qt JPEG plugin missing' }
+      - name: Frozen app smoke test
+        shell: pwsh
+        run: |
+          $p = Start-Process dist/AIShortsStudio/AIShortsStudio.exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $p.WaitForExit(30000)) { $p.Kill(); throw 'Startup timeout' }
+          if ($p.ExitCode -ne 0) { throw "Startup failed: $($p.ExitCode)" }
+        env:
+          QT_QPA_PLATFORM: offscreen
+      - name: Frozen local AI engine smoke test
+        shell: pwsh
+        run: |
+          $result = Join-Path $env:RUNNER_TEMP 'ai-smoke.json'
+          $p = Start-Process dist/AIShortsStudio/AIShortsStudio.exe -ArgumentList @('--ai-smoke-test', $result) -PassThru
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'AI startup timeout' }
+          if ($p.ExitCode -ne 0 -or -not (Test-Path $result)) { throw 'AI runtime/VAD test failed' }
+          Get-Content $result
+        env:
+          HF_HUB_OFFLINE: '1'
+      - name: Frozen end-to-end speech recognition and ranking (public fixture)
+        run: python scripts/verify_frozen_ai.py --exe dist/AIShortsStudio/AIShortsStudio.exe --download-model
+      - name: Compile installer
+        shell: pwsh
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging/installer.iss'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.INSTALLER_ARTIFACT }}
+          path: |
+            dist/installer/*.exe
+            THIRD_PARTY_NOTICES.md
+          if-no-files-found: error
+  installed-app:
+    name: Installed app smoke test
+    needs: windows
+    runs-on: windows-2022
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.INSTALLER_ARTIFACT }}
+          path: ${{ runner.temp }}/installer-artifact
+      - name: Install and launch from the installed directory
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          # Use only the downloaded artifact. This runner still has preinstalled tooling.
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+          Remove-Item Env:PYTHONHOME, Env:PYTHONPATH -ErrorAction SilentlyContinue
+
+          $artifact = Join-Path $env:RUNNER_TEMP 'installer-artifact'
+          $installers = @(Get-ChildItem -LiteralPath $artifact -Filter '*-setup.exe' -Recurse -File)
+          if ($installers.Count -ne 1) { throw "Expected one setup executable, found $($installers.Count)" }
+          $installDir = Join-Path $env:RUNNER_TEMP 'Установка AI Shorts Studio'
+          $setupLog = Join-Path $env:RUNNER_TEMP 'studio-setup.log'
+          $setup = Start-Process -FilePath $installers[0].FullName -ArgumentList @(
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-',
+            "/DIR=`"$installDir`"", "/LOG=`"$setupLog`""
+          ) -PassThru
+          if (-not $setup.WaitForExit(180000)) { $setup.Kill($true); throw 'Installer timeout' }
+          if ($setup.ExitCode -ne 0) {
+            if (Test-Path -LiteralPath $setupLog) { Get-Content -LiteralPath $setupLog -Tail 40 }
+            throw "Installation failed: $($setup.ExitCode)"
+          }
+
+          $studio = Join-Path $installDir 'AIShortsStudio.exe'
+          $app = Start-Process -FilePath $studio -ArgumentList '--smoke-test' -WorkingDirectory $env:RUNNER_TEMP -PassThru
+          if (-not $app.WaitForExit(30000)) { $app.Kill($true); throw 'Installed app startup timeout' }
+          if ($app.ExitCode -ne 0) { throw "Installed app startup failed: $($app.ExitCode)" }
+
+          $ffmpeg = Join-Path $installDir '_internal\bin\ffmpeg.exe'
+          $ffprobe = Join-Path $installDir '_internal\bin\ffprobe.exe'
+          $sample = Join-Path $env:RUNNER_TEMP 'Проверка кодеков.mp4'
+          & $ffmpeg -v error -nostdin -f lavfi -i 'testsrc2=size=64x64:rate=30' -f lavfi -i 'sine=frequency=440' -t 0.25 -c:v libx264 -c:a aac $sample
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled FFmpeg could not encode H.264/AAC' }
+          $probe = & $ffprobe -v error -show_entries stream=codec_type,codec_name,width,height -of json $sample
+          if ($LASTEXITCODE -ne 0) { throw 'Bundled ffprobe could not read the sample' }
+          $streams = ($probe -join "`n" | ConvertFrom-Json).streams
+          $video = $streams | Where-Object codec_type -EQ 'video'
+          $audio = $streams | Where-Object codec_type -EQ 'audio'
+          if ($video.codec_name -ne 'h264' -or $video.width -ne 64 -or $video.height -ne 64 -or $audio.codec_name -ne 'aac') {
+            throw 'Bundled media tools returned an unexpected sample format'
+          }
