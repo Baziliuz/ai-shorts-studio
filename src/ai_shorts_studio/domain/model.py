@@ -33,20 +33,29 @@ class Clip:
     duck_game: bool = False
     voice_index: int | None = None
 
+    def use_source_size(self, metadata):
+        self.mode = 'source'
+        self.width = metadata['width']
+        self.height = metadata['height']
+        self.fps = metadata['fps']
+
     def validate(self, duration_us):
         if not (isinstance(self.start_us, int) and isinstance(self.end_us, int)
                 and 0 <= self.start_us < self.end_us <= duration_us):
             raise ValueError("Границы: 0 ≤ начало < конец ≤ длительность")
-        if self.mode not in {"center", "manual", "blur", "gaming"}:
+        if self.mode not in {"center", "manual", "blur", "gaming", "source"}:
             raise ValueError("Неизвестная компоновка")
-        if (self.width, self.height) not in {(720,1280),(1080,1920),(1280,720),(1920,1080)}:
+        if self.width <= 0 or self.height <= 0:
             raise ValueError("Недопустимое разрешение")
-        if not 0 < self.fps <= 120 or not .1 <= self.camera_share <= .8:
+        if self.mode != "source" and (self.width, self.height) not in {(720,1280),(1080,1920),(1280,720),(1920,1080)}:
+            raise ValueError("Недопустимое разрешение")
+        if not (self.fps > 0 and (self.mode == "source" or self.fps <= 120)) or not .1 <= self.camera_share <= .8:
             raise ValueError("Недопустимые параметры")
         if self.duck_game and (self.voice_index is None or str(self.voice_index) not in self.audio or len(self.audio)<2):
             raise ValueError('Для приглушения игры выберите микрофон и хотя бы ещё одну отдельную аудиодорожку')
-        for r in (self.crop, self.camera, self.game):
-            r.validate()
+        if self.mode != "source":
+            for r in (self.crop, self.camera, self.game):
+                r.validate()
         if any(not 0 <= float(v) <= 4 for v in self.audio.values()):
             raise ValueError("Громкость должна быть от 0 до 400%")
 

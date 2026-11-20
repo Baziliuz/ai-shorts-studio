@@ -29,7 +29,9 @@ def graph(clip, metadata):
         "scale=trunc(iw*sar/2)*2:ih,setsar=1"
     )
     parts = []
-    if clip.mode == 'blur':
+    if clip.mode == 'source':
+        parts.append(f"[0:{metadata['video_index']}]trim=end={duration:.6f}[v]")
+    elif clip.mode == 'blur':
         parts += [prefix+' ,split=2[bg][fg]',f'[bg]{fill(w,h)},boxblur=20:2[b]',
                   f'[fg]scale={w}:{h}:force_original_aspect_ratio=decrease[f]',
                   '[b][f]overlay=(W-w)/2:(H-h)/2[v0]']
@@ -39,7 +41,8 @@ def graph(clip, metadata):
                   f'[game]{crop(clip.game)},{fit(w,h-top)}[g]', '[c][g]vstack=inputs=2[v0]']
     else:
         parts += [prefix+(','+crop(clip.crop) if clip.mode=='manual' else '')+','+fill(w,h)+'[v0]']
-    parts += [f'[v0]fps=fps={clip.fps:.8f}:start_time=0,format=yuv420p[v]']
+    if clip.mode != 'source':
+        parts += [f'[v0]fps=fps={clip.fps:.8f}:start_time=0,format=yuv420p[v]']
     valid = {str(a['index']) for a in metadata['audio']}
     labels = []
     by_index = {}
@@ -107,7 +110,7 @@ def validate_export(path, clip, duration, audio):
         raise RuntimeError('Разрешение результата отличается от выбранного профиля')
     if abs(result['duration_us'] / 1e6 - duration) > max(.15, 2 / clip.fps):
         raise RuntimeError('Длительность результата отличается от границ клипа')
-    if abs(result['fps'] - clip.fps) > .01:
+    if clip.mode != 'source' and abs(result['fps'] - clip.fps) > .01:
         raise RuntimeError('Частота кадров результата отличается от выбранной')
     if result['video_codec'] != 'h264':
         raise RuntimeError('Видеодорожка результата имеет кодек, отличный от H.264')
@@ -151,7 +154,13 @@ class Renderer:
         args += ['-i', str(source), '-filter_complex', filters, '-map', '[v]']
         if audio:
             args += ['-map','[a]','-c:a','aac','-b:a','192k']
-        args += ['-c:v',encoder,'-pix_fmt','yuv420p','-movflags','+faststart','-t',f'{duration:.6f}',
+        pixel_format = 'yuv420p'
+        if clip.mode == 'source':
+            args += ['-fps_mode:v', 'passthrough', '-enc_time_base:v', '-1']
+            dimensions = (metadata.get('coded_width', clip.width), metadata.get('coded_height', clip.height))
+            if any(value % 2 for value in dimensions):
+                pixel_format, encoder = 'yuv444p', 'libx264'
+        args += ['-c:v',encoder,'-pix_fmt',pixel_format,'-movflags','+faststart','-t',f'{duration:.6f}',
                  '-progress','pipe:1','-nostats','-n']
         attempt_dir = Path(tempfile.mkdtemp(prefix='.ai-shorts-render-', dir=destination.parent))
         temporary = attempt_dir / 'result.mp4'

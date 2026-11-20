@@ -65,7 +65,7 @@ def probe(path, *, strict_fps=False):
             raise ValueError('Не удалось проверить частоту кадров результата') from None
         fps = 30
     return dict(duration_us=round(duration*1e6), video_duration_us=round(video_duration*1e6),
-                width=w, height=h, fps=fps,
+                width=w, height=h, coded_width=v['width'], coded_height=v['height'], fps=fps,
                 size=Path(path).stat().st_size, video_codec=v['codec_name'], video_index=v['index'],
                 rotation=rotation, sar=sar, audio=[dict(index=s['index'], codec=s['codec_name'],
                 title=s.get('tags',{}).get('title',f"Дорожка {s['index']}"))

@@ -24,6 +24,7 @@ class AnalysisDialog(QDialog):
         self.format = QComboBox()
         self.format.addItem('9:16 · вертикально', '9:16')
         self.format.addItem('16:9 · горизонтально', '16:9')
+        self.format.addItem('Как в исходнике', 'source')
         self.format.setCurrentIndex(max(0, self.format.findData(orientation)))
         if automatic:
             form.addRow('Пропорции кадра', self.format)

@@ -99,6 +99,7 @@ class Window(QMainWindow):
         self.resolution = QComboBox()
         for w,h in [(720,1280),(1080,1920),(1280,720),(1920,1080)]:
             self.resolution.addItem(f'{w} × {h} · {"9:16" if h > w else "16:9"}',f'{w}x{h}')
+        self.resolution.addItem('Как в исходнике', 'source')
         form_root.addWidget(QLabel('Размер выбранных клипов'))
         form_root.addWidget(self.resolution)
         self.button('Сохранить выбранные клипы (MP4)', self.export, form_root)
@@ -308,6 +309,8 @@ class Window(QMainWindow):
 
         selected = self.selected()
         orientation = '16:9' if selected and selected.width > selected.height else '9:16'
+        if selected and selected.mode == 'source':
+            orientation = 'source'
         dialog = AnalysisDialog(self.project.metadata, self, automatic=automatic, orientation=orientation)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -384,6 +387,8 @@ class Window(QMainWindow):
         existing = {clip.id: clip for clip in self.project.clips}
         width, height = (1080, 1920) if orientation == '9:16' else (1920, 1080)
         metadata = self.project.metadata
+        if orientation == 'source':
+            width, height = metadata['width'], metadata['height']
         same_aspect = width * metadata['height'] == height * metadata['width']
         template = self.selected()
         first_new = len(self.project.clips)
@@ -393,10 +398,12 @@ class Window(QMainWindow):
                 continue
             identities = candidate.setdefault('auto_clips', {})
             clip = existing.get(identities.get(orientation))
-            if clip is None or clip.width * height != clip.height * width:
+            if clip is None or clip.width * height != clip.height * width or (clip.mode == 'source') != (orientation == 'source'):
                 clip = self.clip_from_candidate(candidate, template)
                 clip.width, clip.height = width, height
                 clip.mode = 'center' if same_aspect else 'blur'
+                if orientation == 'source':
+                    clip.use_source_size(metadata)
                 identities[orientation] = clip.id
                 self.project.clips.append(clip)
             candidate['status'] = 'accepted'
@@ -475,7 +482,7 @@ class Window(QMainWindow):
     def load_clip(self,row):
         if self.loading or not self.selected(): return
         c = self.selected(); self.name.setText(c.name); self.start.set_us(c.start_us); self.end.set_us(c.end_us)
-        self.mode.setCurrentIndex(self.mode.findData(c.mode)); self.resolution.setCurrentIndex(self.resolution.findData(f'{c.width}x{c.height}'))
+        self.mode.setCurrentIndex(max(0, self.mode.findData(c.mode))); self.resolution.setCurrentIndex(self.resolution.findData('source' if c.mode == 'source' else f'{c.width}x{c.height}'))
         self.fps.setCurrentText(str(int(c.fps)) if c.fps in (30,60) else 'Исходная')
         for key,controls in self.rects.items():
             r = getattr(c,key)
@@ -505,8 +512,13 @@ class Window(QMainWindow):
             c.start_us,c.end_us = self.start.value_us(),self.end.value_us()
         except ValueError as error:
             self.message(error); return False
-        c.mode = self.mode.currentData(); c.width,c.height = map(int,self.resolution.currentData().split('x'))
-        c.fps = self.project.metadata['fps'] if self.fps.currentIndex()==0 else float(self.fps.currentText())
+        size = self.resolution.currentData()
+        if size == 'source':
+            c.use_source_size(self.project.metadata)
+        else:
+            c.mode = self.mode.currentData()
+            c.width, c.height = map(int, size.split('x'))
+            c.fps = self.project.metadata['fps'] if self.fps.currentIndex()==0 else float(self.fps.currentText())
         c.camera_share = self.share.value()
         c.normalize_audio=self.normalize.isChecked(); c.duck_game=self.duck.isChecked(); c.voice_index=self.voice.currentData()
         c.audio = {i:g.value() for i,(check,g) in self.audio_controls.items() if check.isChecked()}
@@ -613,9 +625,14 @@ class Window(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self,'Папка для экспорта')
         if not folder: return
         clips = [deepcopy(self.project.clips[i]) for i in rows]
-        width, height = map(int, self.resolution.currentData().split('x'))
+        size = self.resolution.currentData()
         for clip in clips:
-            clip.width, clip.height = width, height
+            if size == 'source':
+                clip.use_source_size(self.project.metadata)
+                continue
+            if clip.mode == 'source':
+                clip.mode = 'center'
+            clip.width, clip.height = map(int, size.split('x'))
             if not self.advanced.isChecked():
                 clip.mode = 'center'
                 clip.crop = Rect()
