@@ -179,7 +179,8 @@ class Renderer:
                     time.sleep(.05 * 2**attempt)
 
     def _encode(self, args, attempt_dir, duration, progress):
-        with tempfile.TemporaryFile(dir=attempt_dir) as errors:
+        # Close the child process log before removing the attempt directory.
+        with (attempt_dir / 'ffmpeg.log').open('x+b') as errors:
             if self.cancelled.is_set():
                 raise Cancelled()
             process = subprocess.Popen(

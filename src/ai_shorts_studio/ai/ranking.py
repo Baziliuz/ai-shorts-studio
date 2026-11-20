@@ -67,6 +67,11 @@ TOPIC_SWITCH = re.compile(
 TEASER = re.compile(r'^(?:that\'s what we(?:\'re| are) going to find out|we\'ll find out|'
                     r'узнаем (?:дальше|чуть позже|в этом видео))\b', re.I)
 DEPENDENT_HOOK = re.compile(r'^(?:and|or|so|then|и|или|а|так что|тогда)\b', re.I)
+UNFINISHED_TAIL = re.compile(
+    r'(?:[,;:—]|\b(?:and|or|but|including|like|because|for example|и|или|но|например|потому что))$', re.I)
+STATEMENT_VERB = re.compile(
+    r'\b(?:is|are|was|were|has|have|can|does|offers|uses|comes|работает|помогает|'
+    r'выглядит|получается|даёт|умеет|держит|расходует|вмещает)\b', re.I)
 CONTINUATION = re.compile(
     r'^(?:а\s+(?:ещё|потом|вот|здесь|там|этот|эта|эти)|но|зато|поэтому|потому что|'
     r'например|то есть|во-вторых|с другой стороны|при этом|однако|в итоге|'
@@ -156,27 +161,32 @@ def _hook(segments):
             phrase = ' '.join(segment['text'][left:right].split())
             words = _words(phrase)
             topics = _topic_words(phrase)
-            if (5 <= len(words) <= 12 and len(phrase) <= 76 and len(topics) >= 2
-                    and END_OF_SENTENCE.search(phrase)
+            sentence = len(topics) >= 2 and END_OF_SENTENCE.search(phrase)
+            plain_statement = (topics and phrase[0].isupper() and STATEMENT_VERB.search(phrase)
+                               and not UNFINISHED_TAIL.search(phrase))
+            if (5 <= len(words) <= 12 and len(phrase) <= 76 and (sentence or plain_statement)
                     and not (QUESTION_END.search(phrase) or CONTINUATION.match(phrase)
                              or DEPENDENT_HOOK.match(phrase))):
                 phrases.append((int(bool(REASONING.search(phrase))), len(topics), phrase))
     return max(phrases, default=(0, 0, ''), key=lambda item: item[:2])[2]
 
 
-def _proposal(start, end, anchor, segments, evidence, score, explanation, source_id):
+def _proposal(start, end, anchor, segments, evidence, score, explanation, source_id, kind):
     text = ' '.join(s['text'].strip() for s in segments)
     title = (text[:72] + '…' if len(text) > 72 else text) or f'Фрагмент {anchor // SECOND} сек.'
     segment_ids = list(dict.fromkeys(s['id'] for s in segments))
     identity = f'ai-shorts-studio/content-v{CONTENT_RANKING_VERSION}/{source_id}/{start}:{end}'
     return dict(id=uuid5(NAMESPACE_URL, identity).hex, name=title, start_us=start, end_us=end,
                 score=min(100, round(score)), segment_ids=segment_ids, evidence=evidence,
-                explanation=explanation, text=text[:1200], hook=_hook(segments),
+                kind=kind, explanation=explanation, text=text[:1200], hook=_hook(segments),
                 anchor_us=min(max(anchor, start), end - 1), status='pending')
 
 
 def _speech_proposals(segments, source_id):
-    for group in _speech_groups(_speech_pieces(segments)):
+    pieces = sorted(_speech_pieces(segments), key=lambda segment: segment['start_us'])
+    for group in _speech_groups(pieces):
+        while len(group) > 1 and UNFINISHED_TAIL.search(group[-1]['text'].strip()):
+            group.pop()
         text = ' '.join(s['text'].strip() for s in group)
         words = _words(text)
         if QUESTION_END.search(text) or len(words) < 7 or len(_topic_words(text)) < 3:
@@ -200,7 +210,7 @@ def _speech_proposals(segments, source_id):
         anchor = (anchor_segment['start_us'] + anchor_segment['end_us']) // 2
         score = 40 + 14 * answered + 14 * reasoned + min(18, len(words) / 3)
         yield _proposal(group[0]['start_us'], max(s['end_us'] for s in group), anchor, group,
-                        evidence, score, 'Границы выбраны по репликам, паузам и связкам речи.', source_id)
+                        evidence, score, 'Границы выбраны по репликам, паузам и связкам речи.', source_id, 'speech')
 
 
 def _activity_runs(segments, signals):
@@ -234,7 +244,8 @@ def _event_proposals(segments, signals, duration_us, profile, source_id):
                 or (strong >= .65 and (combined >= .52 or cue))
                 or (profile == 'game' and cue)):
             continue
-        left = max(0, run[0][0] - 4 * SECOND)
+        lead_in = 6 if combined >= .52 else 4
+        left = max(0, run[0][0] - lead_in * SECOND)
         right = min(duration_us, run[-1][0] + 5 * SECOND)
         speech = segments[bisect_left(ends, left):bisect_right(starts, right)]
         start = min(left, speech[0]['start_us']) if speech else left
@@ -248,7 +259,7 @@ def _event_proposals(segments, signals, duration_us, profile, source_id):
             evidence.append(f'Реплика реакции: «{cue}»')
         score = 28 + 36 * strong + 22 * combined + 9 * bool(cue) + 5 * bool(speech)
         yield _proposal(start, end, anchor, speech, evidence, score,
-                        'Границы охватывают подводку, изменение сигнала и время для реакции.', source_id)
+                        'Границы охватывают подводку, изменение сигнала и время для реакции.', source_id, 'event')
 
 
 def content_candidates(segments, signals, duration_us, profile='auto', source_id='', *, automatic=False):
@@ -276,7 +287,9 @@ def content_candidates(segments, signals, duration_us, profile='auto', source_id
         for other in selected:
             overlap = min(item['end_us'], other['end_us']) - max(item['start_us'], other['start_us'])
             shorter = min(item['end_us'] - item['start_us'], other['end_us'] - other['start_us'])
-            if overlap * 2 > shorter:
+            nearby_activity = (item['kind'] == other['kind'] == 'event'
+                               and abs(item['anchor_us'] - other['anchor_us']) <= 10 * SECOND)
+            if overlap * 2 > shorter or (nearby_activity and overlap * 3 >= shorter):
                 break
         else:
             selected.append(item)

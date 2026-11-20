@@ -66,7 +66,9 @@ def test_analysis_dialog_and_review(tmp_path):
     setup=AnalysisDialog({'audio':[dict(index=2,title='Микрофон')]}, automatic=True, orientation='16:9')
     assert setup.orientation=='16:9'
     setup.profile.setCurrentIndex(setup.profile.findData('game'))
-    assert setup.parameters()==dict(selection='content', profile='game', audio_index=2, language='ru')
+    assert setup.parameters()==dict(selection='content', profile='game', audio_index=2, language=None)
+    setup.language.setCurrentIndex(setup.language.findData('ru'))
+    assert setup.parameters()['language'] == 'ru'
     setup.accept()
     assert setup.result()==setup.DialogCode.Accepted
     silent=AnalysisDialog({'audio':[]})

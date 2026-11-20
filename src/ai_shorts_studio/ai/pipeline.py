@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import wave
+from uuid import uuid4
 import numpy as np
 from ai_shorts_studio.ai.models import REGISTRY,verify_model
 from ai_shorts_studio.ai.ranking import candidates,content_candidates
@@ -17,8 +18,13 @@ BLOCK_US=300_000_000
 OVERLAP_US=5_000_000
 
 def atomic_json(path,value):
-    path=Path(path); temporary=path.with_suffix(path.suffix+'.tmp')
-    temporary.write_text(json.dumps(value,ensure_ascii=False),encoding='utf-8'); temporary.replace(path)
+    path = Path(path)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 def cache_key(request):
     # Independent of crop, export size, target clip length, and ranking parameters.

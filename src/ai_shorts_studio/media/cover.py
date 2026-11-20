@@ -4,8 +4,8 @@ import math
 from pathlib import Path
 import subprocess
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QImage, QPainter
+from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QTextLayout, QTextOption
 
 from ai_shorts_studio.media.probe import binary, probe
 
@@ -73,6 +73,21 @@ def _choose_frame(video_path, last_us, check_cancelled):
     return best_us
 
 
+def _layout_hook(hook, font, width):
+    layout = QTextLayout(hook, font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(option)
+    layout.beginLayout()
+    height = 0
+    while (line := layout.createLine()).isValid():
+        line.setLineWidth(width)
+        line.setPosition(QPointF(0, height))
+        height += line.height()
+    layout.endLayout()
+    return layout
+
+
 def compose_cover(image, hook):
     hook = ' '.join(hook.split())[:HOOK_MAX_LENGTH]
     if not hook:
@@ -82,26 +97,22 @@ def compose_cover(image, hook):
     short_side = min(result.width(), result.height())
     margin = max(1, round(short_side * .045))
     padding = max(1, round(short_side * .037))
-    inner = QRectF(margin + padding, 0, result.width() - 2 * (margin + padding), result.height())
-    flags = Qt.AlignmentFlag.AlignLeft.value | Qt.TextFlag.TextWordWrap.value | Qt.TextFlag.TextWrapAnywhere.value
     font = QFont('Sans Serif')
     font.setBold(True)
     font.setPixelSize(max(1, round(short_side * .066)))
+    layout = _layout_hook(hook, font, result.width() - 2 * (margin + padding))
+    text_height = layout.boundingRect().height()
+    band_y = result.height() - margin - text_height - 2 * padding
+    band = QRectF(margin, band_y, result.width() - 2 * margin, text_height + 2 * padding)
 
     painter = QPainter(result)
     try:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setFont(font)
-        text_height = painter.boundingRect(inner, flags, hook).height()
-        band_y = result.height() - margin - text_height - 2 * padding
-        band = QRectF(margin, band_y, result.width() - 2 * margin, text_height + 2 * padding)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(14, 18, 27, 218))
         painter.drawRoundedRect(band, padding / 2, padding / 2)
         painter.setPen(QColor('white'))
-        inner.setTop(band_y + padding)
-        inner.setHeight(text_height)
-        painter.drawText(inner, flags, hook)
+        layout.draw(painter, QPointF(margin + padding, band_y + padding))
     finally:
         painter.end()
     return result

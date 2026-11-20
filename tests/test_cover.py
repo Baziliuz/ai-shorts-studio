@@ -4,12 +4,12 @@ from contextlib import closing
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PySide6.QtGui import QImage
+from PySide6.QtGui import QFont, QFontMetricsF, QImage
 from PySide6.QtWidgets import QApplication, QDialog
 
 from ai_shorts_studio.domain.model import Clip
 from ai_shorts_studio.jobs.export import export_clips, revise_cover
-from ai_shorts_studio.media.cover import render_cover
+from ai_shorts_studio.media.cover import _layout_hook, render_cover
 from ai_shorts_studio.media.probe import binary, probe, run
 from ai_shorts_studio.media.render import Renderer
 from ai_shorts_studio.storage.project import Store
@@ -21,6 +21,23 @@ def make_video(path, width, height):
     run([binary('ffmpeg'), '-v', 'error', '-f', 'lavfi', '-i', f'color=black:s={size}:r=24:d=0.6',
          '-f', 'lavfi', '-i', f'testsrc2=s={size}:r=24:d=1.8',
          '-filter_complex', '[0:v][1:v]concat=n=2:v=1:a=0[v]', '-map', '[v]', '-c:v', 'libx264', str(path)])
+
+
+def test_hook_wraps_words_before_falling_back_to_character_wrap():
+    app = QApplication.instance() or QApplication([])
+    font = QFont('Sans Serif')
+    font.setPixelSize(36)
+    width = QFontMetricsF(font).horizontalAdvance('short wo')
+    hook = 'short words'
+    layout = _layout_hook(hook, font, width)
+    assert layout.lineCount() == 2
+    first_line = layout.lineAt(0)
+    assert hook[:first_line.textLength()].strip() == 'short'
+
+    long_word = 'WWWWWWWWWWWWWW'
+    layout = _layout_hook(long_word, font, width)
+    assert layout.lineCount() > 1
+    assert sum(layout.lineAt(index).textLength() for index in range(layout.lineCount())) == len(long_word)
 
 
 @pytest.mark.parametrize('width,height', [(180, 320), (320, 180)])

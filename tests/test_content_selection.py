@@ -43,6 +43,17 @@ def test_game_keeps_lead_in_and_reaction_and_deduplicates_nearby_peaks():
     assert moments[1]['hook'] == '' and moments[1]['text'] == ''
 
 
+def test_game_keeps_setup_before_joint_peaks_and_drops_overlapping_chase():
+    points = [
+        signal(35, .7, .6), signal(36, 1, .85),
+        signal(199, .7, .6), signal(201, 1, 1), signal(203, .5, .5),
+        signal(207, .75, .6), signal(209, .95, .85), signal(211, .5, .5),
+    ]
+    result = content_candidates([], points, 260 * SECOND, 'game', automatic=True)
+    assert [(item['start_us'] // SECOND, item['anchor_us'] // SECOND, item['end_us'] // SECOND)
+            for item in result] == [(193, 201, 208), (29, 36, 41)]
+
+
 def test_conversation_uses_real_word_timings_inside_an_asr_segment():
     first = 'The longer wheelbase helps because passengers have more legroom.'
     second = 'As for charging, the battery can recover much faster compared with its predecessor.'
