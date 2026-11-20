@@ -9,7 +9,7 @@ import tempfile
 import wave
 import numpy as np
 from ai_shorts_studio.ai.models import REGISTRY,verify_model
-from ai_shorts_studio.ai.ranking import candidates
+from ai_shorts_studio.ai.ranking import candidates,content_candidates
 from ai_shorts_studio.media.probe import binary,run,fingerprint
 
 PIPELINE_VERSION=1
@@ -24,6 +24,8 @@ def cache_key(request):
     # Independent of crop, export size, target clip length, and ranking parameters.
     data=dict(source=request['fingerprint'],track=request.get('audio_index'),language=request['language'],
               model=REGISTRY['revision'],asr='faster-whisper-1.1.1-int8-beam3',pipeline=PIPELINE_VERSION)
+    if request.get('audio_index') is not None and not request.get('speech_enabled',True):
+        data['asr']='disabled'
     return hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest()
 
 def audio_signals(path,offset,core_start,core_end):
@@ -75,6 +77,7 @@ def analyze(request,notify=lambda value,message:None):
     audio_index=request.get('audio_index')
     if audio_index is not None and audio_index not in {a['index'] for a in request['metadata']['audio']}:
         raise ValueError('В исходнике нет выбранной дорожки')
+    speech_enabled=audio_index is not None and request.get('speech_enabled',True)
     directory=Path(request['cache_dir'])/'analysis'/cache_key(request)
     directory.mkdir(parents=True,exist_ok=True)
     work_root=Path(request.get('work_dir',directory)); work_root.mkdir(parents=True,exist_ok=True)
@@ -91,6 +94,10 @@ def analyze(request,notify=lambda value,message:None):
                 for segment in cached['segments']:
                     if not (isinstance(segment['text'],str) and isinstance(segment['id'],str) and 0<=segment['start_us']<segment['end_us']<=duration):
                         raise ValueError('cache segment')
+                    for word in segment.get('words',[]):
+                        if not (isinstance(word,list) and len(word)==3 and isinstance(word[2],str)
+                                and segment['start_us']<=word[0]<word[1]<=segment['end_us']):
+                            raise ValueError('cache word timestamp')
                 for item in cached['signals']:
                     if not (0<=item['time_us']<duration and all(math.isfinite(item[k]) and item[k]>=0 for k in ('rms','delta'))):
                         raise ValueError('cache signal')
@@ -103,7 +110,7 @@ def analyze(request,notify=lambda value,message:None):
         current=[]; signals=[]
         with tempfile.TemporaryDirectory(prefix='work-',dir=work_root) as work:
             if audio_index is not None:
-                if model is None:
+                if speech_enabled and model is None:
                     notify(core_start/duration,'Проверка и загрузка локальной модели в память · CPU int8')
                     verify_model(request['model_dir'])
                     from faster_whisper import WhisperModel
@@ -115,12 +122,20 @@ def analyze(request,notify=lambda value,message:None):
                     '-t',f'{(end-start)/1e6:.6f}','-map',f'0:{audio_index}','-vn','-ac','1','-ar','16000',
                     '-c:a','pcm_s16le','-n',str(audio)],timeout=None)
                 signals=audio_signals(audio,start,core_start,core_end)
+            if speech_enabled:
                 transcription,_=model.transcribe(str(audio),language=request['language'] or None,
-                    beam_size=3,vad_filter=True,condition_on_previous_text=False)
+                    beam_size=3,vad_filter=True,condition_on_previous_text=False,word_timestamps=True)
                 for number,segment in enumerate(transcription):
                     first=max(0,start+round(segment.start*1e6)); last=min(duration,start+round(segment.end*1e6))
                     if core_start<=(first+last)//2<core_end and first<last and segment.text.strip():
-                        current.append(dict(id=f'b{block}_s{number}',start_us=first,end_us=last,text=segment.text.strip()))
+                        words=[]
+                        for word in segment.words or []:
+                            word_start=max(first,start+round(word.start*1e6))
+                            word_end=min(last,start+round(word.end*1e6))
+                            if word_start<word_end:
+                                words.append([word_start,word_end,word.word])
+                        current.append(dict(id=f'b{block}_s{number}',start_us=first,end_us=last,
+                                            text=segment.text.strip(),words=words))
                     notify(min(.97,last/duration*.98),f'Распознавание речи · блок {block+1}/{blocks} · CPU')
             notify(core_start/duration,f'Анализ разницы кадров · блок {block+1}/{blocks}')
             visual=motion_signals(source,core_start,core_end,request['metadata']['video_index'])
@@ -139,9 +154,17 @@ def analyze(request,notify=lambda value,message:None):
             continue
         merged.append(segment)
     signals=normalize_signals(raw_signals)
-    proposals=candidates(merged,signals,duration,request['target_us'],request['min_us'],request['max_us'],request['limit'])
-    notify(1,'Анализ завершён · просмотрите предложения')
-    return dict(candidates=proposals,segment_count=len(merged),engine='faster-whisper-small / CPU int8',
+    selection=request.get('selection','fixed')
+    if selection=='content':
+        proposals=content_candidates(merged,signals,duration,request.get('profile','auto'),request['fingerprint'],
+                                     automatic=request.get('automatic',False))
+    elif selection=='fixed':
+        proposals=candidates(merged,signals,duration,request['target_us'],request['min_us'],request['max_us'],request['limit'])
+    else:
+        raise ValueError('Неизвестный режим выбора длительности')
+    notify(1,'Анализ завершён')
+    engine='faster-whisper-small / CPU int8' if speech_enabled else 'Без распознавания речи'
+    return dict(candidates=proposals,segment_count=len(merged),engine=engine,
                 ranking='эвристики речи, громкости и разницы кадров',cache_key=cache_key(request))
 
 def worker_main(request_path):

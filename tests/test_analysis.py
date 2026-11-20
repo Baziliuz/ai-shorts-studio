@@ -109,10 +109,18 @@ def test_running_analysis_cancels_descendants(tmp_path,monkeypatch):
         return real_popen(command,**kwargs)
     monkeypatch.setattr(runner_module.subprocess,'Popen',launch)
     runner=runner_module.AnalysisRunner()
-    timer=threading.Timer(1,runner.cancel); timer.start()
+    def cancel_when_child_exists():
+        deadline = time.monotonic() + 10
+        while not pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(.02)
+        runner.cancel()
+
+    cancellation = threading.Thread(target=cancel_when_child_exists, daemon=True)
+    cancellation.start()
     try:
         with pytest.raises(Cancelled): runner.analyze(dict(cache_dir=str(tmp_path/'cache')))
-    finally: timer.cancel()
+    finally:
+        cancellation.join(timeout=10)
     assert runner.process is None and pid_path.exists()
     assert not list((tmp_path/'cache'/'analysis-jobs').iterdir())
     pid=int(pid_path.read_text())
@@ -121,7 +129,16 @@ def test_running_analysis_cancels_descendants(tmp_path,monkeypatch):
         assert f' {pid} ' not in result
     else:
         status=Path(f'/proc/{pid}/stat')
-        assert not status.exists() or status.read_text().split()[2]=='Z'
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                state = status.read_text().split()[2]
+            except FileNotFoundError:
+                break
+            if state == 'Z':
+                break
+            assert time.monotonic() < deadline, f"Analysis child {pid} is still running ({state})"
+            time.sleep(.02)
 
 
 def test_schema_one_migrates_with_old_clip(tmp_path):
@@ -134,7 +151,7 @@ def test_schema_one_migrates_with_old_clip(tmp_path):
     db.execute('CREATE TABLE project (id INTEGER PRIMARY KEY, data TEXT)')
     db.execute('INSERT INTO project VALUES (1,?)',(json.dumps(data),)); db.execute('PRAGMA user_version=1'); db.commit(); db.close()
     store=Store(path)
-    assert store.db.execute('PRAGMA user_version').fetchone()[0]==3
+    assert store.db.execute('PRAGMA user_version').fetchone()[0]==4
     assert store.load().clips[0].normalize_audio is False
     assert store.load().suggestions==[]
     store.close()

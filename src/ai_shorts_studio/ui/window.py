@@ -14,7 +14,7 @@ from ai_shorts_studio.domain.model import Project,Clip,Rect,History
 from ai_shorts_studio.storage.project import Store
 from ai_shorts_studio.media.probe import probe,fingerprint
 from ai_shorts_studio.media.render import Renderer
-from ai_shorts_studio.jobs.export import export_clips
+from ai_shorts_studio.jobs.export import export_clips, revise_cover
 from ai_shorts_studio.jobs.worker import Worker
 from ai_shorts_studio.ui.timecode_edit import TimecodeEdit,format_timecode
 
@@ -34,6 +34,7 @@ class Window(QMainWindow):
         self.project,self.store = None,None
         self.history = History()
         self.worker,self.renderer = None,None
+        self.on_complete = self.on_failed = None
         self.loading = False
         self.source_view = True
         self.proxy_view = False
@@ -74,6 +75,7 @@ class Window(QMainWindow):
         self.clips = QListWidget(); self.clips.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.clips.currentRowChanged.connect(self.load_clip); ll.addWidget(self.clips)
         self.button('+ Новый клип',self.add_clip,ll)
+        self.button('Создать нарезку',self.create_shorts,ll)
         self.button('Нарезать по таймкодам',self.add_timecodes,ll)
         self.button('Найти моменты',self.find_moments,ll)
         self.button('Предложения моментов',self.review_moments,ll)
@@ -133,6 +135,8 @@ class Window(QMainWindow):
         self.button('Предпросмотр компоновки (до 8 сек.)',self.preview,form_root)
         self.button('Прослушать выбранный микс (до 8 сек.)',self.preview,form_root)
         self.button('Экспорт выбранных клипов',self.export,form_root)
+        self.button('Редактировать обложку',self.edit_cover,form_root)
+        self.button('Оценить момент',self.rate_clip,form_root)
         self.progress = QProgressBar(); root.addWidget(self.progress)
         self.cancel_button = self.button('Отменить задачу',self.cancel,root); self.cancel_button.setEnabled(False)
         splitter.setSizes([220,730,390])
@@ -147,25 +151,31 @@ class Window(QMainWindow):
     def busy(self):
         return self.worker is not None
 
-    def background(self,task,done,renderer=None):
+    def background(self,task,done,renderer=None,failed=None):
         if self.busy():
             self.message('Дождитесь завершения текущей задачи'); return
         self.renderer = renderer
         self.progress.setRange(0,100) if renderer else self.progress.setRange(0,0)
         self.progress.setValue(0); self.cancel_button.setEnabled(renderer is not None)
         worker = Worker(task); self.worker = worker
+        self.on_complete, self.on_failed = done, failed or self.message
         worker.progress.connect(self.progress.setValue)
         worker.note.connect(self.statusBar().showMessage)
         if hasattr(renderer,'on_status'): renderer.on_status=worker.note.emit
-        worker.done.connect(done)
-        worker.failed.connect(self.message)
         worker.finished.connect(self.task_finished)
         worker.start()
 
     def task_finished(self):
-        self.worker.deleteLater(); self.worker = None; self.renderer = None
+        worker = self.worker
+        done, failed = self.on_complete, self.on_failed
+        self.on_complete = self.on_failed = None
+        worker.deleteLater(); self.worker = None; self.renderer = None
         self.cancel_button.setEnabled(False); self.progress.setRange(0,100)
         self.statusBar().showMessage('Задача завершена')
+        if worker.error is None:
+            done(worker.result)
+        else:
+            failed(worker.error)
 
     def cancel(self):
         if self.renderer:
@@ -256,45 +266,143 @@ class Window(QMainWindow):
 
     def setup_speech_model(self):
         if self.busy(): return
-        from ai_shorts_studio.ai.models import REGISTRY,ModelDownloader
-        model_dir=self.data_dir/'models'/REGISTRY['id']
+        from ai_shorts_studio.ai.models import REGISTRY
         size=sum(f['size'] for f in REGISTRY['files'])/1024**2
         text=(f'Для распознавания нужно скачать многоязычную модель small: {size:.0f} МБ. '
               'Источник: Hugging Face / Systran, лицензия MIT. Модель сохраняется локально, '
               'файлы проверяются по SHA-256. После загрузки интернет для обработки не нужен. '
               'Видео, звук и текст не отправляются на сервер. Распознавание в этой версии — CPU int8. Скачать?')
         if QMessageBox.question(self,'Установка модели речи',text)!=QMessageBox.StandardButton.Yes: return
-        downloader=ModelDownloader()
-        self.background(lambda p:downloader.download(model_dir,p),
-            lambda _:self.message('Модель скачана и проверена. Нажмите «Найти моменты» для запуска.'),downloader)
+        self.download_speech_model(lambda _:self.message('Модель проверена. Распознавание доступно офлайн.'))
+
+    def download_speech_model(self, done):
+        from ai_shorts_studio.ai.models import REGISTRY, ModelDownloader
+
+        downloader = ModelDownloader()
+        model_dir = self.data_dir / 'models' / REGISTRY['id']
+        self.background(lambda progress: downloader.download(model_dir, progress), done, downloader)
 
     def find_moments(self):
+        self.start_analysis(automatic=False)
+
+    def create_shorts(self):
+        self.start_analysis(automatic=True)
+
+    def start_analysis(self, *, automatic):
         if self.busy(): return
         if not self.project:
             self.message('Сначала импортируйте видео или откройте проект.'); return
         if self.selected() and not self.apply(): return
-        from ai_shorts_studio.ai.models import REGISTRY,model_ready,ModelDownloader
-        model_dir=self.data_dir/'models'/REGISTRY['id']
-        if self.project.metadata['audio'] and not model_ready(model_dir):
-            self.setup_speech_model(); return
+        from ai_shorts_studio.ai.models import REGISTRY, model_ready
         from ai_shorts_studio.ui.analysis import AnalysisDialog
-        from ai_shorts_studio.ai.runner import AnalysisRunner
-        dialog=AnalysisDialog(self.project.metadata,self)
-        if dialog.exec()!=QDialog.DialogCode.Accepted: return
-        request=dict(source=self.project.source,fingerprint=self.project.fingerprint,
-            metadata=deepcopy(self.project.metadata),cache_dir=str(self.cache_dir),model_dir=str(model_dir),**dialog.parameters())
-        runner=AnalysisRunner()
-        self.background(lambda p:runner.analyze(request,p),self.analysis_done,runner)
 
-    def analysis_done(self,result):
-        previous={(c['start_us'],c['end_us']):c for c in self.project.suggestions}
-        proposals=result['candidates']
+        selected = self.selected()
+        orientation = '16:9' if selected and selected.width > selected.height else '9:16'
+        dialog = AnalysisDialog(self.project.metadata, self, automatic=automatic, orientation=orientation)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        orientation = dialog.orientation if automatic else None
+        model_dir = self.data_dir / 'models' / REGISTRY['id']
+        request = dict(source=self.project.source, fingerprint=self.project.fingerprint,
+                       metadata=deepcopy(self.project.metadata), cache_dir=str(self.cache_dir),
+                       model_dir=str(model_dir), automatic=automatic, **dialog.parameters())
+        if request['audio_index'] is None or model_ready(model_dir):
+            self.run_analysis(request, orientation)
+            return
+
+        size = sum(item['size'] for item in REGISTRY['files']) / 1024**2
+        prompt = QMessageBox(self)
+        prompt.setWindowTitle('Модель речи')
+        prompt.setText(f'Для распознавания речи можно скачать Whisper small ({size:.0f} МБ, Hugging Face). '
+                       'После установки анализ работает офлайн. Можно сразу начать по громкости и движению.')
+        download = prompt.addButton('Скачать и начать', QMessageBox.ButtonRole.AcceptRole)
+        signals = prompt.addButton('Громкость и движение', QMessageBox.ButtonRole.ActionRole)
+        prompt.addButton(QMessageBox.StandardButton.Cancel)
+        prompt.exec()
+        if prompt.clickedButton() == download:
+            self.download_speech_model(lambda _: self.run_analysis(request, orientation))
+        elif prompt.clickedButton() == signals:
+            self.run_analysis(dict(request, speech_enabled=False), orientation)
+
+    def run_analysis(self, request, orientation):
+        from ai_shorts_studio.ai.runner import AnalysisRunner
+
+        runner = AnalysisRunner()
+
+        def failed(error):
+            if runner.cancelled.is_set() or request['audio_index'] is None or not request.get('speech_enabled', True):
+                self.message(error)
+                return
+            reply = QMessageBox.question(self, 'Анализ остановлен',
+                                         error + '\n\nПродолжить по громкости и движению без распознавания речи?')
+            if reply == QMessageBox.StandardButton.Yes:
+                self.run_analysis(dict(request, speech_enabled=False), orientation)
+
+        self.background(lambda progress: runner.analyze(request, progress),
+                        lambda result: self.analysis_done(result, orientation), runner, failed)
+
+    def analysis_done(self, result, orientation=None):
+        previous = {(c['start_us'], c['end_us']): c for c in self.project.suggestions}
+        proposals = result['candidates']
         for candidate in proposals:
-            old=previous.get((candidate['start_us'],candidate['end_us']))
-            if old: candidate['status']=old.get('status','pending')
-        self.history.record(self.project); self.project.suggestions=proposals; self.save()
+            old = previous.pop((candidate['start_us'], candidate['end_us']), {})
+            for key in ('status', 'clip_id', 'auto_clips'):
+                if key in old:
+                    candidate[key] = old[key]
+        self.history.record(self.project)
+        self.project.suggestions = proposals + [item for item in previous.values() if item.get('status') == 'accepted']
+        if orientation is not None:
+            self.export_candidates(proposals, orientation)
+            return
+        self.save()
         self.message(f"Анализ завершён. Сегментов речи: {result['segment_count']}, предложений: {len(proposals)}. "
-                     'Откройте «Предложения моментов». Оценки эвристические — просмотрите результат перед экспортом.')
+                     'Откройте «Предложения моментов» для просмотра.')
+
+    def clip_from_candidate(self, candidate, template=None):
+        metadata = self.project.metadata
+        if template is None:
+            audio = {str(metadata['audio'][0]['index']): 1} if metadata['audio'] else {}
+            template = Clip('', 0, 1, fps=min(30, metadata['fps']), audio=audio)
+        clip = deepcopy(template)
+        clip.id = uuid4().hex
+        clip.name = candidate['name']
+        clip.start_us, clip.end_us = candidate['start_us'], candidate['end_us']
+        clip.validate(metadata['duration_us'])
+        return clip
+
+    def export_candidates(self, proposals, orientation):
+        existing = {clip.id: clip for clip in self.project.clips}
+        width, height = (1080, 1920) if orientation == '9:16' else (1920, 1080)
+        metadata = self.project.metadata
+        same_aspect = width * metadata['height'] == height * metadata['width']
+        template = self.selected()
+        first_new = len(self.project.clips)
+        clips = []
+        for candidate in proposals:
+            if candidate.get('status') == 'rejected':
+                continue
+            identities = candidate.setdefault('auto_clips', {})
+            clip = existing.get(identities.get(orientation))
+            if clip is None or clip.width * height != clip.height * width:
+                clip = self.clip_from_candidate(candidate, template)
+                clip.width, clip.height = width, height
+                clip.mode = 'center' if same_aspect else 'blur'
+                identities[orientation] = clip.id
+                self.project.clips.append(clip)
+            candidate['status'] = 'accepted'
+            clips.append(clip)
+        self.save()
+        if not clips:
+            self.message('Анализ завершён. Моментов с достаточными сигналами для экспорта нет.')
+            return
+        self.refresh(first_new if first_new < len(self.project.clips) else self.project.clips.index(clips[0]))
+        self.clips.clearSelection()
+        ids = {clip.id for clip in clips}
+        for row, clip in enumerate(self.project.clips):
+            if clip.id in ids:
+                self.clips.item(row).setSelected(True)
+        folder = self.store.path.parent / (self.store.path.stem + ' — Нарезка')
+        self.start_export(deepcopy(clips), folder)
 
     def review_moments(self):
         if self.busy(): return
@@ -306,13 +414,11 @@ class Window(QMainWindow):
         outcome=dialog.exec()
         chosen=dialog.chosen() if outcome==QDialog.DialogCode.Accepted else []
         clips=[]
-        metadata=self.project.metadata
         for candidate in chosen:
-            clip=deepcopy(self.selected())
-            if clip is None:
-                clip=Clip('',0,1,fps=min(30,metadata['fps']),audio={str(metadata['audio'][0]['index']):1} if metadata['audio'] else {})
-            clip.id=uuid4().hex; clip.name=candidate['name']; clip.start_us=candidate['start_us']; clip.end_us=candidate['end_us']
-            clip.validate(metadata['duration_us']); clips.append(clip); candidate['status']='accepted'
+            clip = self.clip_from_candidate(candidate, self.selected())
+            clips.append(clip)
+            candidate['status'] = 'accepted'
+            candidate['clip_id'] = clip.id
         if clips or dialog.proposals!=self.project.suggestions:
             self.history.record(self.project); row=len(self.project.clips)
             self.project.suggestions=dialog.proposals; self.project.clips.extend(clips); self.save()
@@ -513,13 +619,59 @@ class Window(QMainWindow):
         renderer = Renderer()
         source, metadata = self.project.source, deepcopy(self.project.metadata)
         db_path = self.store.path
+        hooks = {}
+        for candidate in self.project.suggestions:
+            clip_ids = [candidate.get('clip_id'), *candidate.get('auto_clips', {}).values()]
+            for clip_id in clip_ids:
+                if clip_id:
+                    hooks[clip_id] = candidate.get('hook', '')
         self.background(
-            lambda progress: export_clips(db_path, source, metadata, clips, folder, renderer, progress, preference),
+            lambda progress: export_clips(db_path, source, metadata, clips, folder, renderer, progress,
+                                          preference, cover_hooks=hooks),
             self.export_done, renderer,
         )
 
     def export_done(self, results):
-        self.message('Экспортировано:\n' + '\n'.join(str(result.video) for result in results))
+        folder = results[0].video.parent.parent
+        self.message(f'Комплектов MP4 и JPG: {len(results)}\n\nПапка:\n{folder}')
+
+    def edit_cover(self):
+        clip = self.selected()
+        if clip is None or self.busy():
+            return
+        previous = self.store.current_export(clip.id)
+        if previous is None or not previous.video.is_file():
+            self.message('Сначала экспортируйте этот клип. Обложка берётся из готового MP4.')
+            return
+        from ai_shorts_studio.ui.cover import CoverDialog
+
+        try:
+            dialog = CoverDialog(previous.video, hook=previous.hook, frame_us=previous.frame_us, parent=self)
+        except (OSError, ValueError, RuntimeError) as error:
+            self.message(error)
+            return
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        renderer = Renderer()
+        db_path = self.store.path
+        frame_us, hook = dialog.frame_us, dialog.hook
+        clip = deepcopy(clip)
+        self.background(
+            lambda progress: revise_cover(db_path, clip, previous, frame_us, hook, renderer, progress),
+            lambda result: self.message(f'Обложка сохранена:\n{result.cover}'), renderer,
+        )
+
+    def rate_clip(self):
+        clip = self.selected()
+        if clip is None or self.busy():
+            return
+        from ai_shorts_studio.ui.analysis import PublicationDialog
+
+        status, note = self.store.publication_rating(clip.id)
+        dialog = PublicationDialog(clip.name, status, note, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.store.rate_publication(clip.id, dialog.status, dialog.note)
+            self.statusBar().showMessage('Оценка клипа сохранена')
 
     def cache_info(self):
         if self.busy(): return

@@ -121,7 +121,11 @@ def test_video_and_audio_markers(tmp_path):
     assert abs(onset-expected)<.1
     assert abs(onset-first_blue)<.1
 
-def test_delayed_audio_keeps_original_timeline(tmp_path):
+@pytest.mark.parametrize(('start_us', 'end_us', 'expected_onset'), [
+    (800_000, 2_300_000, .6),
+    (0, 800_000, None),
+])
+def test_delayed_audio_keeps_original_timeline(tmp_path, start_us, end_us, expected_onset):
     import array
 
     source = tmp_path / 'delayed-track.mkv'
@@ -132,16 +136,21 @@ def test_delayed_audio_keeps_original_timeline(tmp_path):
          '-map', '0:v', '-map', '1:a', '-map', '2:a', '-c:v', 'libx264', '-c:a', 'pcm_s16le',
          str(source)])
     metadata = probe(source)
-    audio = {str(track['index']): 1 for track in metadata['audio']}
-    clip = Clip('Синхронизация', 800_000, 2_300_000, audio=audio)
+    tracks = metadata['audio'] if expected_onset is not None else metadata['audio'][1:]
+    audio = {str(track['index']): 1 for track in tracks}
+    clip = Clip('Синхронизация', start_us, end_us, audio=audio)
     out = tmp_path / 'sync.mp4'
     Renderer().render(source, clip, metadata, out)
     samples = array.array('f', subprocess.check_output([
         binary('ffmpeg'), '-v', 'error', '-i', str(out), '-vn',
         '-ac', '1', '-ar', '48000', '-f', 'f32le', '-',
     ]))
-    onset = next(i for i, sample in enumerate(samples) if abs(sample) > .05) / 48000
-    assert onset == pytest.approx(.6, abs=.05)
+    assert [track['codec'] for track in probe(out)['audio']] == ['aac']
+    onset = next((i / 48000 for i, sample in enumerate(samples) if abs(sample) > .05), None)
+    if expected_onset is None:
+        assert onset is None
+    else:
+        assert onset == pytest.approx(expected_onset, abs=.05)
 
 def test_vfr_and_no_audio(tmp_path):
     source=tmp_path/'vfr.mkv'

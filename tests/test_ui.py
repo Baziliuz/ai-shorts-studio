@@ -60,15 +60,19 @@ def test_timecodes_dialog_validation(tmp_path):
     assert [c.start_us for c in dialog.generated]==[10_000_000,50_000_000]
 
 def test_analysis_dialog_and_review(tmp_path):
-    from ai_shorts_studio.ui.analysis import AnalysisDialog,ReviewDialog
+    from ai_shorts_studio.ui.analysis import AnalysisDialog,PublicationDialog,ReviewDialog
     from PySide6.QtCore import Qt
     app=QApplication.instance() or QApplication([])
-    setup=AnalysisDialog({'audio':[dict(index=2,title='Микрофон')]})
-    assert setup.parameters()['audio_index']==2
-    setup.minimum.setValue(60); setup.accept()
-    assert setup.result()!=setup.DialogCode.Accepted and setup.error.text()
-    setup.target.setCurrentIndex(1); setup.accept()
+    setup=AnalysisDialog({'audio':[dict(index=2,title='Микрофон')]}, automatic=True, orientation='16:9')
+    assert setup.orientation=='16:9'
+    setup.profile.setCurrentIndex(setup.profile.findData('game'))
+    assert setup.parameters()==dict(selection='content', profile='game', audio_index=2, language='ru')
+    setup.accept()
     assert setup.result()==setup.DialogCode.Accepted
+    silent=AnalysisDialog({'audio':[]})
+    assert silent.parameters()['audio_index'] is None and not silent.language.isEnabled()
+    feedback=PublicationDialog('Момент', 'selection_error', ' Нужна реакция ')
+    assert (feedback.status, feedback.note)==('selection_error', 'Нужна реакция')
     proposals=[dict(id='c',name='Ничего себе',start_us=0,end_us=10_000_000,score=70,
                     evidence=['Есть речь'],text='<b>text is data</b>',status='pending')]
     review=ReviewDialog(proposals,str(tmp_path/'missing.mp4'))

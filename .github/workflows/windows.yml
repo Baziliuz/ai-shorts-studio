@@ -6,7 +6,7 @@ concurrency:
 permissions:
   contents: read
 env:
-  INSTALLER_ARTIFACT: AIShortsStudio-0.2.0-windows-x64
+  INSTALLER_ARTIFACT: AIShortsStudio-0.3.0-windows-x64
 jobs:
   windows:
     runs-on: windows-2022
@@ -34,6 +34,7 @@ jobs:
           if (-not ($files | Where-Object Name -Match 'Qt6Multimedia.dll')) { throw 'Qt Multimedia DLL missing' }
           if (-not ($files | Where-Object Name -Match 'ffmpegmediaplugin.dll')) { throw 'Qt FFmpeg backend missing' }
           if (-not ($files | Where-Object Name -Match 'avcodec.*dll')) { throw 'Qt codec libraries missing' }
+          if (-not ($files | Where-Object Name -EQ 'qjpeg.dll')) { throw 'Qt JPEG plugin missing' }
       - name: Frozen app smoke test
         shell: pwsh
         run: |

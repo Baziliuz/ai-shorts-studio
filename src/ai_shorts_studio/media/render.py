@@ -47,10 +47,10 @@ def graph(clip, metadata):
         if str(index) not in valid:
             raise ValueError('Аудиодорожка отсутствует в исходнике')
         label = f'a{len(labels)}'
-        # Align every stream to the same origin before mixing. Pad delayed streams with silence.
+        # Pad delayed or empty track ranges with silence before mixing.
         parts += [
             f'[0:{int(index)}]atrim=end={duration:.6f},volume={float(volume)},'
-            f'aresample=48000:async=1:first_pts=0[{label}]'
+            f'aresample=48000:async=1:first_pts=0,apad=whole_dur={duration:.6f}[{label}]'
         ]
         labels.append(f'[{label}]')
         by_index[str(index)]=f'[{label}]'
@@ -78,7 +78,8 @@ def encoder_available(encoder):
 
 def capabilities():
     filters = run([binary('ffmpeg'),'-hide_banner','-filters'])
-    required = ['trim','atrim','scale','crop','overlay','boxblur','vstack','amix','alimiter','fps','loudnorm','sidechaincompress']
+    required = ('trim', 'atrim', 'scale', 'crop', 'overlay', 'boxblur', 'vstack',
+                'apad', 'amix', 'alimiter', 'fps', 'loudnorm', 'sidechaincompress')
     missing = [x for x in required if f' {x} ' not in filters]
     if missing:
         raise RuntimeError('В FFmpeg отсутствуют фильтры: '+', '.join(missing))

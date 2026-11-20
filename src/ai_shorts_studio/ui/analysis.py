@@ -2,43 +2,104 @@ from copy import deepcopy
 from PySide6.QtCore import Qt,QUrl
 from PySide6.QtMultimedia import QMediaPlayer,QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
-from PySide6.QtWidgets import (QDialog,QVBoxLayout,QFormLayout,QLabel,QComboBox,QSpinBox,QListWidget,
-    QListWidgetItem,QDialogButtonBox,QPushButton,QHBoxLayout)
+from PySide6.QtWidgets import (QDialog,QVBoxLayout,QFormLayout,QLabel,QComboBox,QListWidget,
+    QListWidgetItem,QDialogButtonBox,QPushButton,QHBoxLayout,QPlainTextEdit)
 from ai_shorts_studio.ui.timecode_edit import format_timecode
 
 class AnalysisDialog(QDialog):
-    def __init__(self,metadata,parent=None):
-        super().__init__(parent); self.setWindowTitle('Найти моменты · экспериментальный режим'); self.resize(570,400)
-        layout=QVBoxLayout(self)
-        note=QLabel('Локально: речь + изменения громкости + разница кадров. Это эвристические предложения для просмотра, а не распознавание побед, эмоций или вирусности. Распознавание — CPU int8; скорость на вашем ПК пока не измерена.')
-        note.setWordWrap(True); layout.addWidget(note)
-        form=QFormLayout(); layout.addLayout(form)
-        self.track=QComboBox()
-        for track in metadata['audio']: self.track.addItem(f"#{track['index']} · {track['title']}",track['index'])
-        if not metadata['audio']: self.track.addItem('Без звука: только разница кадров',None)
-        form.addRow('Дорожка речи (лучше микрофон)',self.track)
-        self.language=QComboBox()
-        for text,key in [('Русский','ru'),('English','en'),('Автоопределение',None)]: self.language.addItem(text,key)
-        form.addRow('Язык',self.language)
-        self.target=QComboBox()
-        for seconds in (30,60,180): self.target.addItem(f'{seconds} сек.',seconds)
-        self.minimum=QSpinBox(); self.minimum.setRange(1,180); self.minimum.setValue(10)
-        self.maximum=QSpinBox(); self.maximum.setRange(1,600); self.maximum.setValue(30)
-        self.target.currentIndexChanged.connect(lambda _:self.maximum.setValue(self.target.currentData()))
-        self.limit=QSpinBox(); self.limit.setRange(1,30); self.limit.setValue(10)
-        form.addRow('Целевая длина',self.target); form.addRow('Минимум, сек.',self.minimum); form.addRow('Строгий максимум, сек.',self.maximum); form.addRow('Не более клипов',self.limit)
-        self.error=QLabel(); self.error.setWordWrap(True); layout.addWidget(self.error)
-        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Начать анализ')
-        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
-    def accept(self):
-        if not self.minimum.value()<=self.target.currentData()<=self.maximum.value():
-            self.error.setText('Минимум ≤ целевая длина ≤ максимум'); return
-        super().accept()
+    def __init__(self, metadata, parent=None, *, automatic=False, orientation=None):
+        super().__init__(parent)
+        self.setWindowTitle('Создать нарезку' if automatic else 'Найти моменты для просмотра')
+        self.resize(500, 240)
+        layout = QVBoxLayout(self)
+        note = QLabel(
+            'Моменты выбираются по речи, громкости и движению. '
+            'Длительность каждого клипа зависит от содержания.'
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.format = QComboBox()
+        self.format.addItem('9:16 · вертикально', '9:16')
+        self.format.addItem('16:9 · горизонтально', '16:9')
+        self.format.setCurrentIndex(max(0, self.format.findData(orientation)))
+        if automatic:
+            form.addRow('Пропорции кадра', self.format)
+
+        self.profile = QComboBox()
+        self.profile.addItem('Определить автоматически', 'auto')
+        self.profile.addItem('Игровой стрим', 'game')
+        self.profile.addItem('Обзор, интервью или подкаст', 'conversation')
+        form.addRow('Тип записи', self.profile)
+
+        self.track = QComboBox()
+        for track in metadata['audio']:
+            self.track.addItem(f"#{track['index']} · {track['title']}", track['index'])
+        if not metadata['audio']:
+            self.track.addItem('Без звука')
+            self.track.setEnabled(False)
+        form.addRow('Дорожка для анализа речи', self.track)
+        self.language = QComboBox()
+        for label, key in [('Русский', 'ru'), ('English', 'en'), ('Автоопределение', None)]:
+            self.language.addItem(label, key)
+        self.language.setCurrentIndex(self.language.count() - 1)
+        self.language.setEnabled(bool(metadata['audio']))
+        form.addRow('Язык речи', self.language)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
+            'Создать нарезку' if automatic else 'Начать анализ'
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @property
+    def orientation(self):
+        return self.format.currentData()
+
     def parameters(self):
-        return dict(audio_index=self.track.currentData(),language=self.language.currentData(),
-            target_us=self.target.currentData()*1_000_000,min_us=self.minimum.value()*1_000_000,
-            max_us=self.maximum.value()*1_000_000,limit=self.limit.value())
+        return dict(selection='content', profile=self.profile.currentData(),
+                    audio_index=self.track.currentData(), language=self.language.currentData())
+
+
+class PublicationDialog(QDialog):
+    def __init__(self, clip_name, status=None, note='', parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Оценить момент')
+        self.resize(440, 230)
+        form = QFormLayout(self)
+        name = QLabel(clip_name)
+        name.setTextFormat(Qt.TextFormat.PlainText)
+        name.setWordWrap(True)
+        form.addRow('Клип', name)
+        self.rating = QComboBox()
+        self.rating.addItem('Выберите оценку')
+        self.rating.addItem('Годится для публикации', 'publishable')
+        self.rating.addItem('Ошибка отбора', 'selection_error')
+        self.rating.setCurrentIndex(max(0, self.rating.findData(status)))
+        form.addRow('Оценка', self.rating)
+        self.comment = QPlainTextEdit(note)
+        self.comment.setPlaceholderText('Например, не хватает подводки или ответ обрезан')
+        form.addRow('Комментарий', self.comment)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        save = buttons.button(QDialogButtonBox.StandardButton.Save)
+        save.setText('Сохранить оценку')
+        save.setEnabled(self.status is not None)
+        self.rating.currentIndexChanged.connect(lambda: save.setEnabled(self.status is not None))
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    @property
+    def status(self):
+        return self.rating.currentData()
+
+    @property
+    def note(self):
+        return self.comment.toPlainText().strip()
 
 class ReviewDialog(QDialog):
     def __init__(self,proposals,source,parent=None):
