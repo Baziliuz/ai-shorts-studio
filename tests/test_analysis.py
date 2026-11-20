@@ -158,3 +158,26 @@ def test_schema_one_migrates_with_old_clip(tmp_path):
     backup=sqlite3.connect(str(path)+'.v1-backup.sqlite')
     assert backup.execute('PRAGMA user_version').fetchone()[0]==1
     backup.close()
+
+
+def test_locked_progress_file_does_not_abort_worker(tmp_path, monkeypatch):
+    from ai_shorts_studio.ai import pipeline
+
+    request_path = tmp_path / 'request.json'
+    request_path.write_text('{}')
+    replace = Path.replace
+
+    def simulate_lock(source, target):
+        if target.name == 'progress.json':
+            raise PermissionError('progress snapshot is open')
+        return replace(source, target)
+
+    def analyze(request, notify):
+        notify(0.5, 'Анализ речи')
+        return {'segment_count': 1}
+
+    monkeypatch.setattr(Path, 'replace', simulate_lock)
+    monkeypatch.setattr(pipeline, 'analyze', analyze)
+    assert pipeline.worker_main(request_path) == 0
+    assert json.loads((tmp_path / 'result.json').read_text())['result']['segment_count'] == 1
+    assert not list(tmp_path.glob('*.tmp'))

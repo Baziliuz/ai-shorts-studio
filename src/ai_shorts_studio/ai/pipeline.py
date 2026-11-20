@@ -177,7 +177,14 @@ def worker_main(request_path):
     request_path=Path(request_path); directory=request_path.parent
     try:
         request=json.loads(request_path.read_text(encoding='utf-8'))
-        def notify(value,message): atomic_json(directory/'progress.json',dict(value=value,message=message))
+        def notify(value, message):
+            try:
+                atomic_json(directory / 'progress.json', dict(value=value, message=message))
+            except PermissionError:
+                # Windows may lock the snapshot while the UI reads it.
+                # The next update can report progress without interrupting analysis.
+                pass
+
         result=analyze(request,notify)
         atomic_json(directory/'result.json',dict(result=result)); return 0
     except Exception as error:
