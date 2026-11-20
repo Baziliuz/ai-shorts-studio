@@ -96,6 +96,20 @@ class Window(QMainWindow):
         self.output.setVolume(.8)
         right = QWidget(); form_root = QVBoxLayout(right)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(right); splitter.addWidget(scroll)
+        self.resolution = QComboBox()
+        for w,h in [(720,1280),(1080,1920),(1280,720),(1920,1080)]:
+            self.resolution.addItem(f'{w} × {h} · {"9:16" if h > w else "16:9"}',f'{w}x{h}')
+        form_root.addWidget(QLabel('Размер выбранных клипов'))
+        form_root.addWidget(self.resolution)
+        self.button('Сохранить выбранные клипы (MP4)', self.export, form_root)
+        self.advanced = QCheckBox('Дополнительные настройки')
+        form_root.addWidget(self.advanced)
+        details = QWidget()
+        form_root.addWidget(details)
+        form_root.addStretch()
+        form_root = QVBoxLayout(details)
+        details.hide()
+        self.advanced.toggled.connect(details.setVisible)
         self.name = QLineEdit()
         self.start,self.end = TimecodeEdit(),TimecodeEdit()
         box = QGroupBox('Фрагмент'); f = QFormLayout(box); form_root.addWidget(box)
@@ -103,12 +117,9 @@ class Window(QMainWindow):
         self.mode = QComboBox()
         for title,key in [('По центру','center'),('Ручная область','manual'),('Размытый фон','blur'),('Игра + камера','gaming')]:
             self.mode.addItem(title,key)
-        self.resolution = QComboBox()
-        for w,h in [(720,1280),(1080,1920),(1280,720),(1920,1080)]:
-            self.resolution.addItem(f'{w} × {h}',f'{w}x{h}')
         self.fps = QComboBox(); self.fps.addItems(['Исходная','30','60'])
         box = QGroupBox('Компоновка'); f = QFormLayout(box); form_root.addWidget(box)
-        f.addRow('Режим',self.mode); f.addRow('Размер',self.resolution); f.addRow('Кадров/сек.',self.fps)
+        f.addRow('Режим',self.mode); f.addRow('Кадров/сек.',self.fps)
         self.button('Выделить области на кадре мышью',self.select_regions,form_root)
         self.rects = {}
         for key,title in [('crop','Кадрирование'),('camera','Веб-камера'),('game','Область игры')]:
@@ -134,7 +145,6 @@ class Window(QMainWindow):
         self.button('Применить изменения',self.apply,form_root)
         self.button('Предпросмотр компоновки (до 8 сек.)',self.preview,form_root)
         self.button('Прослушать выбранный микс (до 8 сек.)',self.preview,form_root)
-        self.button('Экспорт выбранных клипов',self.export,form_root)
         self.button('Редактировать обложку',self.edit_cover,form_root)
         self.button('Оценить момент',self.rate_clip,form_root)
         self.progress = QProgressBar(); root.addWidget(self.progress)
@@ -598,11 +608,22 @@ class Window(QMainWindow):
 
     def export(self):
         rows = sorted({self.clips.row(i) for i in self.clips.selectedItems()})
-        if not self.apply(): return
-        if not rows: return
+        if not rows or self.busy(): return
+        if self.advanced.isChecked() and not self.apply(): return
         folder = QFileDialog.getExistingDirectory(self,'Папка для экспорта')
         if not folder: return
         clips = [deepcopy(self.project.clips[i]) for i in rows]
+        width, height = map(int, self.resolution.currentData().split('x'))
+        for clip in clips:
+            clip.width, clip.height = width, height
+            if not self.advanced.isChecked():
+                clip.mode = 'center'
+                clip.crop = Rect()
+                clip.camera = Rect(0, 0, .25, .25)
+                clip.game = Rect()
+        if not self.advanced.isChecked():
+            self.start_export(clips, folder)
+            return
         upscaled = any(c.width>self.project.metadata['width'] or c.height>self.project.metadata['height'] or c.mode in ('gaming','manual') for c in clips)
         if upscaled and QMessageBox.question(self,'Масштабирование','Возможны увеличение исходника или выбранных областей и потеря детализации. Продолжить?') != QMessageBox.StandardButton.Yes: return
         dialog = QDialog(self); dialog.setWindowTitle('Кодировщик'); layout = QVBoxLayout(dialog)
