@@ -282,6 +282,26 @@ def content_candidates(segments, signals, duration_us, profile='auto', source_id
     dense_conversation = profile == 'auto' and len(proposals) >= 2 and speech_time >= .65 * duration_us
     if not proposals or (profile != 'conversation' and not dense_conversation):
         proposals.extend(_event_proposals(segments, signals, duration_us, profile, source_id))
+    minimum = 30 * SECOND
+    if duration_us < minimum:
+        return []
+    # Snap expanded windows outwards to complete spoken phrases before deduplication.
+    pieces = sorted(_speech_pieces(segments), key=lambda s: s['start_us'])
+    starts = [s['start_us'] for s in pieces]
+    ends = list(accumulate((s['end_us'] for s in pieces), max))
+    for index, item in enumerate(proposals):
+        start, end = item['start_us'], item['end_us']
+        missing = minimum - (end - start)
+        if missing <= 0:
+            continue
+        left = max(0, min(start - missing // 2, duration_us - minimum))
+        right = left + minimum
+        context = pieces[bisect_right(ends, left):bisect_left(starts, right)]
+        if context:
+            left = min(left, context[0]['start_us'])
+            right = max(right, max(s['end_us'] for s in context))
+        proposals[index] = _proposal(left, right, item['anchor_us'], context, item['evidence'],
+                                     item['score'], item['explanation'], source_id, item['kind'])
     selected = []
     for item in sorted(proposals, key=lambda c: (-c['score'], c['start_us'], c['end_us'])):
         for other in selected:
