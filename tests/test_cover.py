@@ -56,6 +56,9 @@ def test_cover_chooses_visible_frame_and_keeps_aspect_ratio(tmp_path, width, hei
     assert (image.width(), image.height()) == (width, height)
     assert titled.size() == image.size()
     assert image != titled
+    branded = tmp_path / 'Каналы.jpg'
+    render_cover(video, branded, frame_us=frame_us, channels=True)
+    assert QImage(str(branded)) != image
 
 
 def test_cover_editor_changes_frame_and_allows_removing_hook(tmp_path):

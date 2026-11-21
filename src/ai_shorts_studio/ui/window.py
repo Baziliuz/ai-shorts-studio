@@ -102,6 +102,8 @@ class Window(QMainWindow):
         self.resolution.addItem('Как в исходнике', 'source')
         form_root.addWidget(QLabel('Размер выбранных клипов'))
         form_root.addWidget(self.resolution)
+        self.channels = QCheckBox('Twitch и VK на обложках Milkmen')
+        form_root.addWidget(self.channels)
         self.button('Сохранить выбранные клипы (MP4)', self.export, form_root)
         self.advanced = QCheckBox('Дополнительные настройки')
         form_root.addWidget(self.advanced)
@@ -257,8 +259,9 @@ class Window(QMainWindow):
 
     def refresh(self,row=0):
         self.loading = True; self.clips.clear()
+        numbers = self.store.clip_numbers(self.project.clips)
         for c in self.project.clips:
-            self.clips.addItem(f'{c.name}\n{format_timecode(c.start_us)[:-3]} — {format_timecode(c.end_us)[:-3]}')
+            self.clips.addItem(f'{numbers[c.id]:03d} · {c.name}\n{format_timecode(c.start_us)[:-3]} — {format_timecode(c.end_us)[:-3]}')
         self.loading = False
         self.clips.setCurrentRow(min(row,len(self.project.clips)-1))
 
@@ -657,6 +660,7 @@ class Window(QMainWindow):
         renderer = Renderer()
         source, metadata = self.project.source, deepcopy(self.project.metadata)
         db_path = self.store.path
+        channels = self.channels.isChecked()
         hooks = {}
         for candidate in self.project.suggestions:
             clip_ids = [candidate.get('clip_id'), *candidate.get('auto_clips', {}).values()]
@@ -665,7 +669,7 @@ class Window(QMainWindow):
                     hooks[clip_id] = candidate.get('hook', '')
         self.background(
             lambda progress: export_clips(db_path, source, metadata, clips, folder, renderer, progress,
-                                          preference, cover_hooks=hooks),
+                                          preference, cover_hooks=hooks, channels=channels),
             self.export_done, renderer,
         )
 
@@ -683,8 +687,9 @@ class Window(QMainWindow):
             return
         from ai_shorts_studio.ui.cover import CoverDialog
 
+        channels = self.channels.isChecked()
         try:
-            dialog = CoverDialog(previous.video, hook=previous.hook, frame_us=previous.frame_us, parent=self)
+            dialog = CoverDialog(previous.video, hook=previous.hook, frame_us=previous.frame_us, channels=channels, parent=self)
         except (OSError, ValueError, RuntimeError) as error:
             self.message(error)
             return
@@ -695,7 +700,7 @@ class Window(QMainWindow):
         frame_us, hook = dialog.frame_us, dialog.hook
         clip = deepcopy(clip)
         self.background(
-            lambda progress: revise_cover(db_path, clip, previous, frame_us, hook, renderer, progress),
+            lambda progress: revise_cover(db_path, clip, previous, frame_us, hook, renderer, progress, channels),
             lambda result: self.message(f'Обложка сохранена:\n{result.cover}'), renderer,
         )
 

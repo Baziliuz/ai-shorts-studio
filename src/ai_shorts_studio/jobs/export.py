@@ -16,6 +16,7 @@ class CoverRequest:
     hook: str
     source_start_us: int
     frame_us: int | None = None
+    channels: bool = False
 
 
 def check_cancelled(renderer):
@@ -23,7 +24,7 @@ def check_cancelled(renderer):
         raise Cancelled()
 
 
-def export_clips(db_path, source, metadata, clips, folder, renderer, progress, preference="auto", *, cover_hooks=None):
+def export_clips(db_path, source, metadata, clips, folder, renderer, progress, preference="auto", *, cover_hooks=None, channels=False):
     folder = Path(folder).resolve()
     check_cancelled(renderer)
     folder.mkdir(parents=True, exist_ok=True)
@@ -44,7 +45,7 @@ def export_clips(db_path, source, metadata, clips, folder, renderer, progress, p
                     source_frame_us = previous.source_start_us + previous.frame_us
                     if clip.start_us <= source_frame_us < clip.end_us:
                         frame_us = source_frame_us - clip.start_us
-                cover = CoverRequest(hook, clip.start_us, frame_us)
+                cover = CoverRequest(hook, clip.start_us, frame_us, channels)
             result = export_clip(
                 store, source, metadata, clip, folder, renderer, encoder,
                 lambda value: progress((index + value) / len(clips)), cover,
@@ -65,7 +66,7 @@ def export_clip(store, source, metadata, clip, folder, renderer, encoder, progre
     return result
 
 
-def revise_cover(db_path, clip, previous, frame_us, hook, renderer, progress):
+def revise_cover(db_path, clip, previous, frame_us, hook, renderer, progress, channels=False):
     def copy_video(path):
         with previous.video.open("rb") as original, path.open("xb") as target:
             while block := original.read(4 * 1024 * 1024):
@@ -76,7 +77,7 @@ def revise_cover(db_path, clip, previous, frame_us, hook, renderer, progress):
     store = Store(db_path, recover=False)
     try:
         cover = CoverRequest(hook, previous.source_start_us if previous.source_start_us is not None else clip.start_us,
-                             frame_us)
+                             frame_us, channels)
         folder = previous.video.parent
         if not previous.attempt_id.startswith("legacy:"):
             folder = folder.parent
@@ -91,7 +92,8 @@ def revise_cover(db_path, clip, previous, frame_us, hook, renderer, progress):
 def publish_export(store, clip, folder, renderer, write_video, cover, replace_attempt=None):
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", clip.name).strip(" .")[:48] or "Клип"
     attempt_id = uuid4().hex
-    stem = f"{name}_{clip.id[:8]}"
+    number = store.clip_numbers([clip])[clip.id]
+    stem = f"{number:03d}_{name}"
     final = folder / f"{stem}_{attempt_id[:12]}"
     video_name = f"{stem}.mp4"
     with TemporaryDirectory(prefix=".shorts-", dir=folder, ignore_cleanup_errors=True) as temporary:
@@ -104,7 +106,7 @@ def publish_export(store, clip, folder, renderer, write_video, cover, replace_at
             from ai_shorts_studio.media.cover import render_cover
 
             image_name = f"{stem}.jpg"
-            frame_us = render_cover(staging / video_name, staging / image_name, hook=cover.hook,
+            frame_us = render_cover(staging / video_name, staging / image_name, hook=cover.hook, channels=cover.channels,
                                     frame_us=cover.frame_us, check_cancelled=lambda: check_cancelled(renderer))
             result = ExportResult(attempt_id, clip.id, final / video_name, final / image_name,
                                   frame_us, cover.hook, cover.source_start_us)

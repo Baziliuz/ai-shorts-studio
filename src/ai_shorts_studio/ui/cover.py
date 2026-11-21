@@ -10,10 +10,11 @@ from ai_shorts_studio.ui.timecode_edit import TimecodeEdit
 
 
 class CoverDialog(QDialog):
-    def __init__(self, video_path, *, hook='', frame_us=None, parent=None):
+    def __init__(self, video_path, *, hook='', frame_us=None, channels=False, parent=None):
         super().__init__(parent)
         self.setWindowTitle('Обложка клипа')
         self.resize(620, 600)
+        self.channels = channels
         self._video_path = video_path
         self._last_us = last_frame_us(probe(video_path))
         self.frame_us = self._last_us // 2 if frame_us is None else min(self._last_us, max(0, frame_us))
@@ -109,7 +110,7 @@ class CoverDialog(QDialog):
 
     def _show_frame(self):
         if self._frame is not None:
-            frame = compose_cover(self._frame, self.hook)
+            frame = compose_cover(self._frame, self.hook, self.channels)
             pixmap = QPixmap.fromImage(frame).scaled(490, self.preview.height(), Qt.AspectRatioMode.KeepAspectRatio,
                                                       Qt.TransformationMode.SmoothTransformation)
             self.preview.setPixmap(pixmap)

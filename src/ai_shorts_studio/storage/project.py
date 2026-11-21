@@ -34,6 +34,7 @@ class Store:
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             self.db.execute("CREATE TABLE IF NOT EXISTS project (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL)")
+            self.db.execute("CREATE TABLE IF NOT EXISTS clip_numbers (number INTEGER PRIMARY KEY, clip_id TEXT NOT NULL UNIQUE)")
             self.db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, status TEXT, output TEXT)")
             self.db.execute("CREATE TABLE IF NOT EXISTS feedback (source TEXT, start_us INTEGER, end_us INTEGER, status TEXT, PRIMARY KEY(source,start_us,end_us))")
             self.db.execute("""
@@ -70,6 +71,12 @@ class Store:
             clip.validate(project.metadata['duration_us'])
         with self.db:
             self.db.execute("INSERT OR REPLACE INTO project VALUES (1,?)", (json.dumps(project.serialize(), ensure_ascii=False),))
+
+    def clip_numbers(self, clips):
+        with self.db:
+            self.db.executemany("INSERT OR IGNORE INTO clip_numbers (clip_id) VALUES (?)",
+                                ((clip.id,) for clip in clips))
+            return dict(self.db.execute("SELECT clip_id, number FROM clip_numbers"))
 
     def load(self):
         row = self.db.execute("SELECT data FROM project WHERE id=1").fetchone()

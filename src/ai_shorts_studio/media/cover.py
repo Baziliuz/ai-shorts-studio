@@ -88,8 +88,28 @@ def _layout_hook(hook, font, width):
     return layout
 
 
-def compose_cover(image, hook):
+def compose_cover(image, hook, channels=False):
     hook = ' '.join(hook.split())[:HOOK_MAX_LENGTH]
+    if channels:
+        result = compose_cover(image, hook).convertToFormat(QImage.Format.Format_RGB32)
+        side = min(result.width(), result.height())
+        margin = max(1, round(side * .05))
+        font = QFont('Sans Serif')
+        font.setPixelSize(max(1, round(side * .032)))
+        painter = QPainter(result)
+        try:
+            painter.setFont(font)
+            links = 'twitch.tv/milkmen2026\nlive.vkvideo.ru/milkmen'
+            metrics = painter.fontMetrics()
+            width = max(metrics.horizontalAdvance(line) for line in links.splitlines())
+            pad = max(1, margin // 3)
+            band = QRectF(margin, margin, width + 2 * pad, 2 * metrics.lineSpacing() + 2 * pad)
+            painter.fillRect(band, QColor(14, 18, 27, 220))
+            painter.setPen(QColor('white'))
+            painter.drawText(band.adjusted(pad, 0, -pad, 0), Qt.AlignmentFlag.AlignVCenter, links)
+        finally:
+            painter.end()
+        return result
     if not hook:
         return image
 
@@ -118,7 +138,7 @@ def compose_cover(image, hook):
     return result
 
 
-def render_cover(video_path, destination, *, hook='', frame_us=None, metadata=None, check_cancelled=lambda: None):
+def render_cover(video_path, destination, *, hook='', channels=False, frame_us=None, metadata=None, check_cancelled=lambda: None):
     """Write a JPEG to a caller-owned staging path and return the clip-relative frame position."""
     metadata = probe(video_path) if metadata is None else metadata
     last_us = last_frame_us(metadata)
@@ -127,7 +147,7 @@ def render_cover(video_path, destination, *, hook='', frame_us=None, metadata=No
     else:
         frame_us = min(last_us, max(0, frame_us))
     check_cancelled()
-    image = compose_cover(read_frame(video_path, frame_us), hook)
+    image = compose_cover(read_frame(video_path, frame_us), hook, channels)
     check_cancelled()
     if not image.save(str(Path(destination)), 'JPEG', 92):
         raise RuntimeError('Не удалось сохранить JPG-обложку')
