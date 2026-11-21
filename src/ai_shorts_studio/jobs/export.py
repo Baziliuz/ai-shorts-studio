@@ -38,8 +38,10 @@ def export_clips(db_path, source, metadata, clips, folder, renderer, progress, p
             cover = None
             if cover_hooks is not None:
                 previous = store.current_export(clip.id)
-                hook = cover_hooks.get(clip.id, "")
+                hook = clip.plan_hook or cover_hooks.get(clip.id, "")
                 frame_us = None
+                if clip.plan_cover_us is not None and clip.start_us <= clip.plan_cover_us < clip.end_us:
+                    frame_us = clip.plan_cover_us - clip.start_us
                 if previous and previous.cover is not None:
                     hook = previous.hook
                     source_frame_us = previous.source_start_us + previous.frame_us

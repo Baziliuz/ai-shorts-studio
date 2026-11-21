@@ -103,16 +103,21 @@ class PublicationDialog(QDialog):
         return self.comment.toPlainText().strip()
 
 class ReviewDialog(QDialog):
-    def __init__(self,proposals,source,parent=None):
+    def __init__(self,proposals,source,parent=None, *, imported=False):
         super().__init__(parent); self.setWindowTitle('Предложения моментов · выберите после просмотра'); self.resize(950,850)
         self.proposals=deepcopy(proposals); layout=QVBoxLayout(self)
         note=QLabel('Оценка 0–100 — эвристическая. Просмотр ниже показывает исходник и первую аудиодорожку. Итоговую компоновку и выбранный микс проверяйте через «Предпросмотр» после создания клипа.')
+        if imported:
+            self.setWindowTitle('План нарезки из ChatGPT')
+            note.setText('Проверьте фрагменты и снимите отметки с ненужных.')
         note.setWordWrap(True); layout.addWidget(note)
         self.items=QListWidget(); layout.addWidget(self.items)
         for candidate in self.proposals:
             first=format_timecode(candidate['start_us'])[:-3]; last=format_timecode(candidate['end_us'])[:-3]
             item=QListWidgetItem(f"{candidate['score']}/100 · {first} — {last}\n{candidate['name']}\n"+'; '.join(candidate['evidence']))
-            item.setFlags(item.flags()|Qt.ItemFlag.ItemIsUserCheckable); item.setCheckState(Qt.CheckState.Unchecked)
+            if imported:
+                item.setText(f"{first} → {last} · {candidate['name']}")
+            item.setFlags(item.flags()|Qt.ItemFlag.ItemIsUserCheckable); item.setCheckState(Qt.CheckState.Checked if imported else Qt.CheckState.Unchecked)
             if candidate['status']=='accepted':
                 item.setText('[Уже создан] '+item.text()); item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
             elif candidate['status']=='rejected': item.setText('[Отклонён] '+item.text())

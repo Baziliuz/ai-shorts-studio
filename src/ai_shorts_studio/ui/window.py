@@ -79,6 +79,8 @@ class Window(QMainWindow):
         self.button('Нарезать по таймкодам',self.add_timecodes,ll)
         self.button('Найти моменты',self.find_moments,ll)
         self.button('Предложения моментов',self.review_moments,ll)
+        self.button('Подготовить для ChatGPT',lambda: self.start_analysis(automatic=False, exchange=True),ll)
+        self.button('Импортировать план нарезки',self.import_chat_plan,ll)
         self.button('Удалить клип',self.delete_clip,ll)
         self.info = QLabel('Импортируйте MP4, MOV, MKV или AVI.\nВсе материалы остаются на компьютере.')
         self.info.setWordWrap(True); ll.addWidget(self.info)
@@ -302,11 +304,11 @@ class Window(QMainWindow):
     def create_shorts(self):
         self.start_analysis(automatic=True)
 
-    def start_analysis(self, *, automatic):
+    def start_analysis(self, *, automatic, exchange=False):
         if self.busy(): return
         if not self.project:
             self.message('Сначала импортируйте видео или откройте проект.'); return
-        if self.selected() and not self.apply(): return
+        if not exchange and self.selected() and not self.apply(): return
         from ai_shorts_studio.ai.models import REGISTRY, model_ready
         from ai_shorts_studio.ui.analysis import AnalysisDialog
 
@@ -322,6 +324,11 @@ class Window(QMainWindow):
         request = dict(source=self.project.source, fingerprint=self.project.fingerprint,
                        metadata=deepcopy(self.project.metadata), cache_dir=str(self.cache_dir),
                        model_dir=str(model_dir), automatic=automatic, **dialog.parameters())
+        if exchange:
+            target, _ = QFileDialog.getSaveFileName(self, 'Сохранить пакет для ChatGPT',
+                str(self.store.path.with_suffix('.chat.zip')), 'ZIP (*.zip)')
+            if not target: return
+            request.update(selection='exchange', package_path=target)
         if request['audio_index'] is None or model_ready(model_dir):
             self.run_analysis(request, orientation)
             return
@@ -354,6 +361,19 @@ class Window(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 self.run_analysis(dict(request, speech_enabled=False), orientation)
 
+        if request.get('selection') == 'exchange':
+            from ai_shorts_studio.jobs.chat_exchange import write_package
+            def prepare(progress):
+                analysis = runner.analyze(request, lambda v: progress(.8*v))
+                runner.on_status('Подготовка кадров и ZIP')
+                return write_package(request['package_path'], request, analysis, runner, progress)
+            def saved(result):
+                package, index = result
+                self.project.exchange_indexes[package] = index
+                self.save()
+                self.message('Пакет готов. Прикрепите ZIP в чат:\n' + request['package_path'])
+            self.background(prepare, saved, runner, self.message)
+            return
         self.background(lambda progress: runner.analyze(request, progress),
                         lambda result: self.analysis_done(result, orientation), runner, failed)
 
@@ -449,6 +469,32 @@ class Window(QMainWindow):
                 self.refresh(row); self.clips.clearSelection()
                 for index in range(row,len(self.project.clips)): self.clips.item(index).setSelected(True)
                 self.statusBar().showMessage(f'Создано клипов: {len(clips)}. Проверьте компоновку и звук через предпросмотр.')
+
+    def import_chat_plan(self):
+        if self.busy(): return
+        if not self.project:
+            self.message('Сначала откройте проект'); return
+        from ai_shorts_studio.jobs.chat_exchange import parse_plan
+        from ai_shorts_studio.ui.analysis import ReviewDialog
+        path, _ = QFileDialog.getOpenFileName(self, 'Выберите cuts.json', '', 'JSON (*.json)')
+        if not path: return
+        try:
+            proposals = parse_plan(json.loads(Path(path).read_text(encoding='utf-8-sig')), self.project)
+        except (ValueError, OSError) as error:
+            self.message(error); return
+        existing = {(c.start_us, c.end_us) for c in self.project.clips}
+        proposals = [p for p in proposals if (p['start_us'], p['end_us']) not in existing]
+        if not proposals:
+            self.message('Новых фрагментов в плане нет.'); return
+        dialog = ReviewDialog(proposals, self.project.source, self, imported=True)
+        if dialog.exec() != QDialog.DialogCode.Accepted: return
+        clips = []
+        for p in dialog.chosen():
+            c = self.clip_from_candidate(p)
+            c.use_source_size(self.project.metadata)
+            c.plan_hook, c.plan_cover_us = p['hook'], p['cover_us']
+            clips.append(c)
+        self.append_timecode_clips(clips)
 
     def add_timecodes(self):
         if self.busy(): return

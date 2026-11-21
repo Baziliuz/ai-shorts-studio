@@ -32,6 +32,8 @@ class Clip:
     normalize_audio: bool = False
     duck_game: bool = False
     voice_index: int | None = None
+    plan_hook: str = ""
+    plan_cover_us: int | None = None
 
     def use_source_size(self, metadata):
         self.mode = 'source'
@@ -73,6 +75,7 @@ class Project:
     metadata: dict
     clips: list[Clip] = field(default_factory=list)
     suggestions: list[dict] = field(default_factory=list)
+    exchange_indexes: dict = field(default_factory=dict)
 
     def serialize(self):
         return asdict(self)
@@ -80,7 +83,7 @@ class Project:
     @classmethod
     def load(cls, data):
         return cls(data["source"], data["fingerprint"], data["metadata"],
-                   [Clip.load(c) for c in data["clips"]], data.get("suggestions", []))
+                   [Clip.load(c) for c in data["clips"]], data.get("suggestions", []), data.get("exchange_indexes", {}))
 
 class History:
     def __init__(self):

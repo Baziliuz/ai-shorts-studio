@@ -161,6 +161,8 @@ def analyze(request,notify=lambda value,message:None):
         merged.append(segment)
     signals=normalize_signals(raw_signals)
     selection=request.get('selection','fixed')
+    if selection == 'exchange':
+        return dict(segments=merged, signals=signals, speech_enabled=speech_enabled)
     if selection=='content':
         proposals=content_candidates(merged,signals,duration,request.get('profile','auto'),request['fingerprint'],
                                      automatic=request.get('automatic',False))
